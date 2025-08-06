@@ -14,11 +14,13 @@ has error_event_processors => sub { [] };
 has event_processors       => sub { [] };
 has extra                  => sub { {} };
 has fingerprint            => sub { [] };
-has level                  => Sentry::Severity->Info;
+has level                  => undef;
 has span                   => undef;
 has tags                   => sub { {} };
 has transaction_name       => undef;
 has user                   => undef;
+
+my $DEFAULT_MAX_BREADCRUMBS = 100;
 
 sub set_span ($self, $span) {
   $self->span($span);
@@ -92,7 +94,15 @@ sub clear ($self) {
 
 sub add_breadcrumb ($self, $breadcrumb) {
   $breadcrumb->{timestamp} //= time;
-  push @{ $self->breadcrumbs }, $breadcrumb;
+
+  my $breadcrumbs = $self->breadcrumbs;
+
+  my $max_crumbs = $ENV{SENTRY_MAX_BREADCRUMBS} || $DEFAULT_MAX_BREADCRUMBS;
+  if (scalar $breadcrumbs->@* >= $max_crumbs) {
+    shift $breadcrumbs->@*;
+  }
+
+  push $breadcrumbs->@*, $breadcrumb;
 }
 
 sub clear_breadcrumbs ($self) {
@@ -121,7 +131,7 @@ sub apply_to_event ($self, $event, $hint = undef) {
   merge($event, $self, 'user')     if $self->user;
   merge($event, $self, 'contexts') if $self->contexts;
 
-  $event->{level} //= $self->level                if $self->level;
+  $event->{level}       = $self->level            if $self->level;
   $event->{transaction} = $self->transaction_name if $self->transaction_name;
 
   if ($self->span) {
@@ -131,11 +141,6 @@ sub apply_to_event ($self, $event, $hint = undef) {
       trace => $self->span->get_trace_context(),
       ($event->{contexts} // {})->%*
     };
-
-    if (my $transaction_name = $self->span->transaction->name) {
-      $event->{tags}
-        = { transaction => $transaction_name, ($event->{tags} // {})->%* };
-    }
   }
 
   $self->_apply_fingerprint($event);

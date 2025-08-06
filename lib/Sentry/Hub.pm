@@ -8,7 +8,7 @@ use Sentry::Severity;
 use Sentry::Tracing::SamplingMethod;
 use Sentry::Tracing::Transaction;
 use Sentry::Util qw(uuid4);
-use Time::HiRes qw(time);
+use Time::HiRes  qw(time);
 use Try::Tiny;
 
 my $Instance;
@@ -28,7 +28,7 @@ sub reset ($self) {
 
 sub bind_client ($self, $client) {
   $self->client($client);
-  $client->setup_integrations();
+  $client->setup_integrations() if $client;
 }
 
 sub get_current_scope ($package) {
@@ -66,7 +66,7 @@ sub get_scope ($self) {
 }
 
 sub _invoke_client ($self, $method, @args) {
-  my $client = $self->client;
+  my $client = $self->client or return;
   my $scope  = $self->get_current_scope;
 
   if ($client->can($method)) {
@@ -81,11 +81,8 @@ sub _new_event_id ($self) {
   return $self->_last_event_id;
 }
 
-sub capture_message (
-  $self, $message,
-  $level = Sentry::Severity->Info,
-  $hint = undef,
-) {
+sub capture_message ($self, $message, $level = undef, $hint = undef,) {
+  $level //= Sentry::Severity->Info;
   my $event_id = $self->_new_event_id();
 
   $self->_invoke_client('capture_message', $message, $level,
@@ -124,7 +121,7 @@ sub run ($self, $cb) {
 }
 
 sub sample ($self, $transaction, $sampling_context) {
-  my $client  = $self->client;
+  my $client  = $self->client or return;
   my $options = ($client && $client->get_options) // {};
 
   #  nothing to do if there's no client or if tracing is disabled

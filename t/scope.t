@@ -40,17 +40,18 @@ describe 'Sentry::Hub::Scope' => sub {
     };
 
     describe 'level' => sub {
-      it 'defaults to level "info"' => sub {
+      it 'has no default level' => sub {
         my $event = $scope->apply_to_event({});
 
-        is $event->{level}, Sentry::Severity->Info;
+        is $event->{level}, undef;
       };
 
-      it 'does not override the event level' => sub {
+      it 'overrides the event level' => sub {
+        $scope->set_level(Sentry::Severity->Warning);
         my $event
           = $scope->apply_to_event({ level => Sentry::Severity->Fatal });
 
-        is $event->{level}, Sentry::Severity->Fatal;
+        is $event->{level}, Sentry::Severity->Warning;
       };
     };
   };
@@ -86,6 +87,20 @@ describe 'Sentry::Hub::Scope' => sub {
   describe 'set_extras' => sub {
     it 'set_extras should not crash' => sub {
       lives_ok { Sentry::Hub::Scope->new->set_extras({ foo => 'bar' }) };
+    };
+  };
+
+  describe 'add_breadcrumb' => sub {
+    it 'limits breadcrumb items' => sub {
+      local $ENV{SENTRY_MAX_BREADCRUMBS} = 2;
+
+      $scope->add_breadcrumb({ message => 'foo' });
+      $scope->add_breadcrumb({ message => 'bar' });
+      $scope->add_breadcrumb({ message => 'baz' });
+
+      is scalar $scope->breadcrumbs->@*,      2;
+      is $scope->breadcrumbs->[0]->{message}, 'bar';
+      is $scope->breadcrumbs->[1]->{message}, 'baz';
     };
   };
 };

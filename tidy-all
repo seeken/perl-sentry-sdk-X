@@ -1,0 +1,4 @@
+#!/bin/sh
+
+cpanm -nq Perl::Tidy
+perltidy -b -bext='/' -bm=move $(git ls-files *.pm *.t)

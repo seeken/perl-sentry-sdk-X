@@ -1,14 +1,22 @@
 use Mojo::Base -strict, -signatures;
 
+use Mojo::File;
+# curfile missing in Mojolicious@^8. The dependency shall not be updated for
+# the time being. For this reason `curfile` is duplicated for now.
+# use lib curfile->sibling('lib')->to_string;
+# See https://github.com/mojolicious/mojo/blob/4093223cae00eb516e38f2226749d2963597cca3/lib/Mojo/File.pm#L36
+use lib Mojo::File->new(Cwd::realpath((caller)[1]))->sibling('lib')->to_string;
+
 use Mojo::Exception;
-use Mojo::Util 'dumper';
+use Mojo::Home;
+use Mojo::JSON;
 use Sentry::Stacktrace;
 use Test::Exception;
 use Test::Spec;
 
 {
 
-  package My::Exeption;
+  package My::Exception;
   use Mojo::Base -base;
 }
 
@@ -37,7 +45,7 @@ describe 'Sentry::SDK' => sub {
     it
       'does not throw if `exception` is an exception object other than Mojo::Exception'
       => sub {
-        $stacktrace->exception(My::Exeption->new);
+        $stacktrace->exception(My::Exception->new);
         lives_ok { $stacktrace->prepare_frames };
       };
   };

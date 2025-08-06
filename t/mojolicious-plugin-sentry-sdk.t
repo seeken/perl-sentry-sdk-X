@@ -89,6 +89,8 @@ describe 'Mojolicious::Plugin::SentrySDK' => sub {
     is ref($http->requests->[1]{body}), '';
 
     ok exists $http->requests->[0]{body}{exception};
+
+    is $http->requests->[0]{body}{level}, Sentry::Severity->Error;
   };
 
   it 'registers breadcrumbs' => sub {
@@ -117,7 +119,7 @@ describe 'Mojolicious::Plugin::SentrySDK' => sub {
 
     my %event = $http->requests->[0]{body}->%*;
 
-    is $event{tags}{transaction} => '/dies/nested/:foo';
+    is $event{transaction} => '/dies/nested/:foo';
 
   }
 };

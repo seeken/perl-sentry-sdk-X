@@ -14,6 +14,7 @@ use Sentry::Hub;
 use Sentry::Logger 'logger';
 use Sentry::SDK;
 use Sentry::Severity;
+use Test::Exception;
 use Test::Snapshot;
 use Test::Spec;
 use UUID::Tiny 'is_UUID_string';
@@ -66,6 +67,14 @@ describe 'Sentry::SDK' => sub {
 
       is_deeply_snapshot($hub->client->get_options, 'client options (env)');
     };
+
+    it 'disables SDK if DSN is empty' => sub {
+      Sentry::SDK->init({ dsn => '' });
+
+      is($hub->client, undef, 'client is undefined');
+
+      lives_ok { Sentry::SDK->capture_message('foo') };
+    };
   };
 
   describe 'message sending' => sub {
@@ -87,20 +96,20 @@ describe 'Sentry::SDK' => sub {
     };
 
     it 'capture_event()' => sub {
-      my $event = { foo => 'bar' };
+      my $event   = { foo   => 'bar' };
       my $context = { level => Sentry::Severity->Error };
       Sentry::SDK->capture_event($event, $context);
 
       my $captured = $client->_captured_message;
       isa_ok $captured->{scope}, 'Sentry::Hub::Scope';
-      is_deeply $captured->{event}, $event;
+      is_deeply $captured->{event},                 $event;
       is_deeply $captured->{hint}{capture_context}, $context;
       is_UUID_string $captured->{hint}{event_id};
     };
 
     it 'capture_exception()' => sub {
       my $exception = Mojo::Exception->new('ohoh');
-      my $context = { level => Sentry::Severity->Warning };
+      my $context   = { level => Sentry::Severity->Warning };
       Sentry::SDK->capture_exception($exception, $context);
 
       my $captured = $client->_captured_message;
@@ -139,7 +148,7 @@ describe 'Sentry::SDK' => sub {
   };
 
   it 'start_transaction()' => sub {
-    Sentry::SDK->init({ traces_sample_rate => 1, });
+    Sentry::SDK->init({ dsn => 'abc', traces_sample_rate => 1, });
 
     my $tx
       = Sentry::SDK->start_transaction(
