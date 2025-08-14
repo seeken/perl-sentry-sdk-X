@@ -133,4 +133,8 @@ sub send ($self, $payload) {
   return $tx->res->json;
 }
 
+sub send_envelope ($self, $envelope) {
+  return $self->send($envelope);
+}
+
 1;

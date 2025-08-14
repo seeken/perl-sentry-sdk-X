@@ -435,5 +435,22 @@ sub _send_event ($self, $event) {
   return;
 }
 
+sub _prepare_envelope ($self) {
+  require Sentry::Envelope;
+  
+  return Sentry::Envelope->new(
+    headers => {
+      event_id => uuid4(),
+      sent_at => strftime('%Y-%m-%dT%H:%M:%S.000Z', gmtime(time())),
+      trace => {},
+    }
+  );
+}
+
+sub _send_envelope ($self, $envelope) {
+  $self->_transport->send_envelope($envelope);
+  return;
+}
+
 1;
 

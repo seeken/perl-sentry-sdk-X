@@ -141,6 +141,34 @@ sub start_transaction ($package, $context, $custom_sampling_context = undef) {
   return _call_on_hub('start_transaction', $context, $custom_sampling_context);
 }
 
+# Cron monitoring methods
+
+sub capture_check_in ($package, $options = {}) {
+  require Sentry::Crons;
+  return Sentry::Crons->capture_check_in($options);
+}
+
+sub update_check_in ($package, $check_in_id, $status, $duration_ms = undef) {
+  require Sentry::Crons;
+  return Sentry::Crons->update_check_in($check_in_id, $status, $duration_ms);
+}
+
+sub with_monitor ($package, $monitor_slug, $coderef, $options = {}) {
+  require Sentry::Crons;
+  return Sentry::Crons->with_monitor($monitor_slug, $coderef, $options);
+}
+
+sub upsert_monitor ($package, $monitor_config) {
+  require Sentry::Crons;
+  return Sentry::Crons->upsert_monitor($monitor_config);
+}
+
+sub get_last_event_id ($package) {
+  my $hub = Sentry::Hub->get_current_hub();
+  return $hub->last_event_id() if $hub->can('last_event_id');
+  return undef;
+}
+
 1;
 
 __END__
@@ -284,6 +312,44 @@ When an event is captured and sent to Sentry, event data with extra information 
   $transaction->finish();
 
 Is needed for recording tracing information. Transactions are usually handled by the respective framework integration. See L<Sentry::Tracing::Transaction>.
+
+=head2 capture_check_in
+
+  my $check_in_id = Sentry::SDK->capture_check_in({
+    monitor_slug => 'daily-backup',
+    status => 'in_progress',
+    environment => 'production',
+  });
+
+  # Later, update the check-in
+  Sentry::SDK->update_check_in($check_in_id, 'ok', 30000);
+
+Captures a cron job check-in for monitoring scheduled tasks. The check-in can be updated later with completion status and duration.
+
+=head2 with_monitor
+
+  Sentry::SDK->with_monitor('daily-backup', sub {
+    # Your cron job code here
+    perform_backup();
+  });
+
+Wraps code execution with automatic cron monitoring. Creates a check-in before execution and updates it with the result automatically.
+
+=head2 upsert_monitor
+
+  Sentry::SDK->upsert_monitor({
+    slug => 'daily-backup',
+    name => 'Daily Database Backup',
+    schedule => {
+      type => 'crontab',
+      value => '0 2 * * *',  # Daily at 2 AM
+    },
+    checkin_margin => 10,  # minutes
+    max_runtime => 60,     # minutes
+    timezone => 'UTC',
+  });
+
+Creates or updates a monitor configuration in Sentry for scheduled job monitoring.
 
 =head1 AUTHOR
 
