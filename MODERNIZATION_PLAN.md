@@ -94,7 +94,426 @@ sub serialize ($self) {
 - Integration tests with various item types
 - Backward compatibility verification
 
-#### 1.2 Rate Limiting and Backpressure Management
+#### 1.2 Integration System Fixes and Enhancements
+
+**Objective**: Fix the bug where custom integrations are not properly initialized and enhance existing integrations with missing telemetry data.
+
+**Critical Bug Fix**:
+The current issue is in `lib/Sentry/SDK.pm` where `setup_integrations()` is never called after the client is created.
+
+**Files to Modify**:
+- `lib/Sentry/SDK.pm` - Fix integration setup
+- `lib/Sentry/Integration.pm` - Improve integration handling
+- `lib/Sentry/Integration/DBI.pm` - Add missing database telemetry
+- `lib/Sentry/Integration/LwpUserAgent.pm` - Add missing HTTP telemetry
+- `lib/Sentry/Integration/MojoUserAgent.pm` - Add missing HTTP telemetry
+- `lib/Sentry/Integration/MojoTemplate.pm` - Add missing template telemetry
+
+**Bug Fix Implementation**:
+```perl
+# Fixed lib/Sentry/SDK.pm
+sub _init_and_bind ($options) {
+  my $hub = Sentry::Hub->get_current_hub();
+  my $client = $options->{dsn} ? Sentry::Client->new(_options => $options) : undef;
+  
+  if ($client) {
+    $hub->bind_client($client);
+    
+    # FIX: Actually call setup_integrations after client is bound
+    $client->setup_integrations();
+  }
+}
+
+sub init ($package, $options = {}) {
+  # Set default integrations if not explicitly disabled
+  $options->{default_integrations} //= 1;
+  $options->{integrations} //= [];
+  
+  # Add built-in integrations unless disabled
+  if ($options->{default_integrations}) {
+    # Allow selective disabling of built-in integrations
+    my %disabled = map { $_ => 1 } @{$options->{disabled_integrations} // []};
+    
+    unless ($disabled{DieHandler}) {
+      push @{$options->{integrations}}, Sentry::Integration::DieHandler->new;
+    }
+    unless ($disabled{DBI}) {
+      push @{$options->{integrations}}, Sentry::Integration::DBI->new;
+    }
+    unless ($disabled{LwpUserAgent}) {
+      push @{$options->{integrations}}, Sentry::Integration::LwpUserAgent->new;
+    }
+    unless ($disabled{MojoUserAgent}) {
+      push @{$options->{integrations}}, Sentry::Integration::MojoUserAgent->new;
+    }
+    unless ($disabled{MojoTemplate}) {
+      push @{$options->{integrations}}, Sentry::Integration::MojoTemplate->new;
+    }
+  }
+  
+  # Existing initialization code...
+  $options->{dsn} //= $ENV{SENTRY_DSN};
+  # ... rest of init
+  
+  _init_and_bind($options);
+}
+```
+
+**Enhanced Integration Implementation**:
+```perl
+# Fixed lib/Sentry/Integration.pm
+package Sentry::Integration;
+
+# Remove global integrations - these should be managed through client options
+sub setup ($package, $integrations = []) {
+  foreach my $integration (grep { !$_->initialized } @$integrations) {
+    $integration->setup_once(
+      Sentry::Hub::Scope->can('add_global_event_processor'),
+      Sentry::Hub->can('get_current_hub')
+    );
+    $integration->initialized(1);
+  }
+}
+```
+
+**Enhanced DBI Integration with Complete Telemetry**:
+```perl
+# Enhanced lib/Sentry/Integration/DBI.pm
+package Sentry::Integration::DBI;
+
+sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
+  return if (!$self->breadcrumbs && !$self->tracing);
+
+  # Enhanced DBI::db->do method
+  around('DBI::db', do => sub ($orig, $dbh, $statement, @args) {
+    my $hub = $get_current_hub->();
+    my $span;
+
+    if ($self->tracing && (my $parent_span = $hub->get_scope()->get_span)) {
+      # Parse statement to get operation
+      my $operation = $self->_extract_sql_operation($statement);
+      my $table = $self->_extract_table_name($statement);
+      
+      $span = $parent_span->start_child({
+        op => 'db.query',
+        description => $self->_truncate_sql($statement),
+        data => {
+          # OpenTelemetry semantic conventions
+          'db.system' => $self->_get_db_system($dbh),
+          'db.operation' => $operation,
+          'db.collection.name' => $table,
+          'db.name' => $dbh->{Name} // 'unknown',
+          'server.address' => $self->_extract_host($dbh),
+          'server.port' => $self->_extract_port($dbh),
+          
+          # Additional context
+          'db.statement' => $self->_should_capture_statement() ? $statement : undef,
+          'db.connection_id' => $dbh,
+          'thread.id' => threads->tid() // $$,
+        },
+      });
+    }
+
+    my $start_time = Time::HiRes::time();
+    my $value = $orig->($dbh, $statement, @args);
+    my $duration = Time::HiRes::time() - $start_time;
+
+    # Enhanced breadcrumb with more context
+    $hub->add_breadcrumb({
+      type => 'query',
+      category => 'db.query',
+      message => $self->_truncate_sql($statement),
+      level => 'info',
+      data => {
+        'db.system' => $self->_get_db_system($dbh),
+        'db.operation' => $self->_extract_sql_operation($statement),
+        'db.collection.name' => $self->_extract_table_name($statement),
+        'duration_ms' => int($duration * 1000),
+        'rows_affected' => $value // 0,
+      },
+    }) if $self->breadcrumbs;
+
+    if ($span) {
+      $span->set_data('db.rows_affected', $value // 0);
+      $span->set_data('duration_ms', int($duration * 1000));
+      $span->finish();
+    }
+
+    return $value;
+  });
+
+  # Enhanced DBI::st->execute method
+  around('DBI::st', execute => sub ($orig, $sth, @args) {
+    my $statement = $sth->{Statement};
+    my $hub = $get_current_hub->();
+    my $span;
+
+    if ($self->tracing && (my $parent_span = $hub->get_scope()->get_span)) {
+      my $operation = $self->_extract_sql_operation($statement);
+      my $table = $self->_extract_table_name($statement);
+      
+      $span = $parent_span->start_child({
+        op => 'db.query',
+        description => $self->_truncate_sql($statement),
+        data => {
+          'db.system' => $self->_get_db_system($sth->{Database}),
+          'db.operation' => $operation,
+          'db.collection.name' => $table,
+          'db.name' => $sth->{Database}->{Name} // 'unknown',
+          'server.address' => $self->_extract_host($sth->{Database}),
+          'server.port' => $self->_extract_port($sth->{Database}),
+          'db.statement' => $self->_should_capture_statement() ? $statement : undef,
+          'db.parameter_count' => scalar(@args),
+          'thread.id' => threads->tid() // $$,
+        },
+      });
+    }
+
+    my $start_time = Time::HiRes::time();
+    my $value = $orig->($sth, @args);
+    my $duration = Time::HiRes::time() - $start_time;
+
+    $hub->add_breadcrumb({
+      type => 'query',
+      category => 'db.query',
+      message => $self->_truncate_sql($statement),
+      level => 'info',
+      data => {
+        'db.system' => $self->_get_db_system($sth->{Database}),
+        'db.operation' => $self->_extract_sql_operation($statement),
+        'db.collection.name' => $self->_extract_table_name($statement),
+        'duration_ms' => int($duration * 1000),
+        'rows_affected' => $sth->rows // 0,
+        'parameter_count' => scalar(@args),
+      },
+    }) if $self->breadcrumbs;
+
+    if ($span) {
+      $span->set_data('db.rows_affected', $sth->rows // 0);
+      $span->set_data('duration_ms', int($duration * 1000));
+      $span->finish();
+    }
+
+    return $value;
+  });
+}
+
+# Helper methods for database telemetry
+sub _get_db_system ($self, $dbh) {
+  my $driver = $dbh->{Driver}->{Name} // 'unknown';
+  return {
+    'mysql' => 'mysql',
+    'Pg' => 'postgresql',
+    'SQLite' => 'sqlite',
+    'Oracle' => 'oracle',
+    'ODBC' => 'mssql',
+  }->{$driver} // lc($driver);
+}
+
+sub _extract_sql_operation ($self, $sql) {
+  return 'unknown' unless $sql;
+  if ($sql =~ /^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE)\b/i) {
+    return uc($1);
+  }
+  return 'unknown';
+}
+
+sub _extract_table_name ($self, $sql) {
+  return undef unless $sql;
+  # Simple regex to extract table name - can be enhanced
+  if ($sql =~ /(?:FROM|INTO|UPDATE|TABLE)\s+`?(\w+)`?/i) {
+    return $1;
+  }
+  return undef;
+}
+
+sub _extract_host ($self, $dbh) {
+  my $name = $dbh->{Name} // '';
+  if ($name =~ /host=([^;]+)/i) {
+    return $1;
+  }
+  return 'localhost';
+}
+
+sub _extract_port ($self, $dbh) {
+  my $name = $dbh->{Name} // '';
+  if ($name =~ /port=(\d+)/i) {
+    return int($1);
+  }
+  return undef;
+}
+
+sub _truncate_sql ($self, $sql, $max_length = 100) {
+  return undef unless $sql;
+  $sql =~ s/\s+/ /g;  # Normalize whitespace
+  return length($sql) > $max_length ? substr($sql, 0, $max_length) . '...' : $sql;
+}
+
+sub _should_capture_statement ($self) {
+  my $client = Sentry::Hub->get_current_hub->client;
+  return $client->_options->{send_default_pii} // 0;
+}
+```
+
+**Enhanced HTTP Client Integrations with Complete Telemetry**:
+```perl
+# Enhanced lib/Sentry/Integration/LwpUserAgent.pm
+package Sentry::Integration::LwpUserAgent;
+
+sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
+  return if (!$self->breadcrumbs && !$self->tracing);
+
+  around($self->_package_name, request => sub ($orig, $lwp, $request, @args) {
+    my $url = $request->uri;
+    
+    # Exclude Sentry requests
+    return $orig->($lwp, $request, @args) if $request->header('x-sentry-auth');
+
+    my $hub = $get_current_hub->();
+    my $span;
+    my $start_time = Time::HiRes::time();
+
+    if ($self->tracing && (my $parent_span = $hub->get_scope()->get_span)) {
+      $span = $parent_span->start_child({
+        op => 'http.client',
+        description => $request->method . ' ' . $url->host,
+        data => {
+          # OpenTelemetry semantic conventions
+          'http.request.method' => $request->method,
+          'server.address' => $url->host,
+          'server.port' => $url->port,
+          'url.full' => $url->as_string,
+          'url.scheme' => $url->scheme,
+          'url.path' => $url->path,
+          'http.query' => $url->query,
+          'http.request.header.user_agent' => $request->header('user-agent'),
+          'http.request.body.size' => length($request->content // ''),
+          'thread.id' => threads->tid() // $$,
+        },
+      });
+
+      # Add trace propagation headers
+      $request->header('sentry-trace' => $span->to_trace_parent);
+      if (my $baggage = $span->get_baggage()) {
+        $request->header('baggage' => $self->_serialize_baggage($baggage));
+      }
+    }
+
+    my $result = $orig->($lwp, $request, @args);
+    my $duration = Time::HiRes::time() - $start_time;
+
+    # Enhanced breadcrumb
+    $hub->add_breadcrumb({
+      type => 'http',
+      category => 'http.client',
+      data => {
+        'http.request.method' => $request->method,
+        'url.full' => $url->as_string,
+        'http.response.status_code' => $result->code,
+        'http.response_content_length' => length($result->content // ''),
+        'duration_ms' => int($duration * 1000),
+        'server.address' => $url->host,
+      },
+      level => $result->is_success ? 'info' : 
+               $result->is_client_error ? 'warning' : 'error',
+    }) if $self->breadcrumbs;
+
+    if ($span) {
+      $span->set_data('http.response.status_code', $result->code);
+      $span->set_data('http.response_content_length', length($result->content // ''));
+      $span->set_data('duration_ms', int($duration * 1000));
+      $span->set_http_status($result->code);
+      $span->finish();
+    }
+
+    # Capture failed requests if configured
+    if ($result->is_error) {
+      $self->_maybe_capture_http_error($request, $result, $duration, $span);
+    }
+
+    return $result;
+  });
+}
+```
+
+**Enhanced Template Integration**:
+```perl
+# Enhanced lib/Sentry/Integration/MojoTemplate.pm
+package Sentry::Integration::MojoTemplate;
+
+sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
+  around('Mojo::Template', render => sub ($orig, $mojo_template, @args) {
+    my $hub = $get_current_hub->();
+    my $parent_span = $self->tracing && $hub->get_current_scope->get_span;
+    my $output;
+    
+    $hub->with_scope(sub ($scope) {
+      my $namespace = $mojo_template->namespace;
+      my $span;
+      my $start_time = Time::HiRes::time();
+      
+      if ($parent_span) {
+        $span = $parent_span->start_child({
+          op => 'template.render',
+          description => $mojo_template->name || 'unnamed_template',
+          data => {
+            'template.engine' => 'mojo',
+            'template.name' => $mojo_template->name,
+            'template.compiled' => $mojo_template->compiled ? 1 : 0,
+            'template.namespace' => $namespace,
+            'code.namespace' => $namespace,
+            'thread.id' => threads->tid() // $$,
+          },
+        });
+        $scope->set_span($span);
+      }
+
+      try {
+        $output = $orig->($mojo_template, @args);
+        
+        my $duration = Time::HiRes::time() - $start_time;
+        
+        if ($span) {
+          $span->set_data('duration_ms', int($duration * 1000));
+          $span->set_data('template.output_size', length($output // ''));
+        }
+        
+        if ($self->fix_stacktrace && ref $output && $output->isa('Mojo::Exception')) {
+          _fix_template_stack_frames($namespace, $output);
+          
+          # Capture template rendering error
+          Sentry::SDK->capture_exception($output, {
+            contexts => {
+              template => {
+                name => $mojo_template->name,
+                namespace => $namespace,
+                compiled => $mojo_template->compiled ? 1 : 0,
+              }
+            },
+            tags => {
+              template_engine => 'mojo',
+              template_error => 1,
+            }
+          });
+        }
+      } finally {
+        $span->finish() if $span;
+      };
+    });
+    
+    return $output;
+  });
+}
+```
+
+**Testing Requirements**:
+- Unit tests for integration setup and custom integration handling
+- Database integration tests with various DBI drivers
+- HTTP client integration tests with different response types
+- Template integration tests with error scenarios
+- Verify all telemetry data follows OpenTelemetry conventions
+
+#### 1.3 Rate Limiting and Backpressure Management
 
 **Objective**: Implement proper rate limiting to respect Sentry's API limits and prevent abuse.
 
@@ -149,12 +568,17 @@ Sentry::SDK->init({
     environment => $environment,
     traces_sample_rate => 0.1,
     
+    # Integration configuration
+    default_integrations => 1,  # Enable built-in integrations
+    disabled_integrations => ['DBI', 'MojoTemplate'],  # Disable specific ones
+    integrations => [MyCustom::Integration->new()],  # Add custom integrations
+    
     # New options
     enable_logs => 0,  # Enable structured logging
     before_send_log => undef,  # Log filtering hook
     max_request_body_size => 'medium',  # none, small, medium, always
     max_attachment_size => 20 * 1024 * 1024,  # 20MB default
-    send_default_pii => 0,
+    send_default_pii => 0,  # Controls SQL statement capture in DB integration
     capture_failed_requests => 0,
     failed_request_status_codes => [500..599],
     failed_request_targets => ['.*'],
@@ -1230,15 +1654,385 @@ Sentry::SDK->add_feature_flag('new-checkout-flow', 1);
 Sentry::SDK->add_feature_flag('payment-provider', 'stripe');
 ```
 
-#### 8.3 GraphQL Integration
+#### 8.3 Minion Job Queue Integration
+
+**Objective**: Add comprehensive telemetry support for Mojolicious Minion job queue system.
 
 **New Files**:
-- `lib/Sentry/Integration/GraphQL.pm`
+- `lib/Sentry/Integration/Minion.pm`
 
-#### 8.4 Session Tracking
+**Enhanced Files**:
+- `lib/Mojolicious/Plugin/SentrySDK.pm`
 
-**New Files**:
-- `lib/Sentry/Session.pm`
+**API Design & Implementation**:
+
+```perl
+# Enhanced Mojolicious::Plugin::SentrySDK with Minion support
+package Mojolicious::Plugin::SentrySDK;
+
+sub register ($self, $app, $conf) {
+  # Existing HTTP monitoring setup...
+  
+  # Add Minion integration if available
+  if ($app->can('minion') && $app->minion) {
+    $self->_setup_minion_monitoring($app, $conf);
+  }
+}
+
+sub _setup_minion_monitoring ($self, $app, $conf) {
+  my $minion = $app->minion;
+  
+  # Hook into job lifecycle
+  $minion->on(job => sub ($minion, $job) {
+    my $job_id = $job->id;
+    my $task = $job->task;
+    my $args = $job->args;
+    my $queue = $job->info->{queue} // 'default';
+    
+    # Start job transaction
+    my $transaction = Sentry::SDK->start_transaction({
+      name => "minion.job.$task",
+      op => 'queue.job',
+      data => {
+        'job.id' => $job_id,
+        'job.task' => $task,
+        'job.queue' => $queue,
+        'job.attempts' => $job->info->{attempts} // 0,
+        'job.retries' => $job->info->{retries} // 0,
+        'job.priority' => $job->info->{priority} // 0,
+        'job.created' => $job->info->{created},
+        'job.delayed' => $job->info->{delayed},
+        'thread.id' => $$,
+        'worker.id' => $job->info->{worker} // 'unknown',
+      },
+    });
+    
+    Sentry::SDK->configure_scope(sub ($scope) {
+      $scope->set_span($transaction);
+      $scope->set_tag('job_queue', 'minion');
+      $scope->set_tag('job_task', $task);
+      $scope->set_tag('job_queue_name', $queue);
+      
+      $scope->set_context('job', {
+        id => $job_id,
+        task => $task,
+        queue => $queue,
+        args => $conf->{capture_job_args} ? $args : '[hidden]',
+        attempts => $job->info->{attempts} // 0,
+        retries => $job->info->{retries} // 0,
+        priority => $job->info->{priority} // 0,
+      });
+    });
+    
+    # Monitor job execution
+    my $start_time = Time::HiRes::time();
+    
+    $job->on(finished => sub ($job, $result) {
+      my $duration = Time::HiRes::time() - $start_time;
+      
+      $transaction->set_data('job.duration_ms', int($duration * 1000));
+      $transaction->set_data('job.result_size', length(ref($result) ? encode_json($result) : ($result // '')));
+      $transaction->set_status('ok');
+      
+      # Add job success breadcrumb
+      Sentry::SDK->add_breadcrumb({
+        type => 'default',
+        category => 'job.success',
+        message => "Job $task completed successfully",
+        level => 'info',
+        data => {
+          'job.id' => $job_id,
+          'job.task' => $task,
+          'job.queue' => $queue,
+          'job.duration_ms' => int($duration * 1000),
+        },
+      });
+      
+      $transaction->finish();
+    });
+    
+    $job->on(failed => sub ($job, $error) {
+      my $duration = Time::HiRes::time() - $start_time;
+      
+      $transaction->set_data('job.duration_ms', int($duration * 1000));
+      $transaction->set_data('job.error', "$error");
+      $transaction->set_status('internal_error');
+      
+      # Capture job failure as exception
+      Sentry::SDK->capture_exception($error, {
+        contexts => {
+          job => {
+            id => $job_id,
+            task => $task,
+            queue => $queue,
+            args => $conf->{capture_job_args} ? $args : '[hidden]',
+            attempts => $job->info->{attempts} // 0,
+            worker => $job->info->{worker},
+          }
+        },
+        tags => {
+          job_queue => 'minion',
+          job_task => $task,
+          job_failure => 1,
+        },
+        fingerprint => ['job-failure', $task, $queue],
+      });
+      
+      # Add job failure breadcrumb
+      Sentry::SDK->add_breadcrumb({
+        type => 'error',
+        category => 'job.failure',
+        message => "Job $task failed: $error",
+        level => 'error',
+        data => {
+          'job.id' => $job_id,
+          'job.task' => $task,
+          'job.queue' => $queue,
+          'job.duration_ms' => int($duration * 1000),
+          'job.error' => "$error",
+        },
+      });
+      
+      $transaction->finish();
+    });
+  });
+  
+  # Monitor worker lifecycle
+  $minion->on(worker => sub ($minion, $worker) {
+    my $worker_id = $worker->id;
+    
+    Sentry::SDK->configure_scope(sub ($scope) {
+      $scope->set_tag('minion_worker_id', $worker_id);
+      $scope->set_context('worker', {
+        id => $worker_id,
+        pid => $$,
+        host => $worker->info->{host},
+        started => $worker->info->{started},
+      });
+    });
+    
+    # Track worker start
+    Sentry::SDK->add_breadcrumb({
+      type => 'default',
+      category => 'worker.start',
+      message => "Minion worker $worker_id started",
+      level => 'info',
+      data => {
+        'worker.id' => $worker_id,
+        'worker.pid' => $$,
+        'worker.host' => $worker->info->{host},
+      },
+    });
+  });
+}
+```
+
+**Dedicated Minion Integration**:
+
+```perl
+package Sentry::Integration::Minion;
+use Mojo::Base 'Sentry::Integration::Base', -signatures;
+
+has name => 'Minion';
+has capture_job_args => 0;
+has capture_job_results => 0;
+has track_job_performance => 1;
+
+sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
+  # This integration is automatically set up by the Mojolicious plugin
+  # when Minion is detected, but can also be used standalone
+  
+  return unless eval { require Minion; 1 };
+  
+  # Add global event processor to enrich events with job context
+  $add_global_event_processor->(sub ($event, $hint) {
+    my $hub = $get_current_hub->();
+    my $scope = $hub->get_scope();
+    
+    # Add job context to all events if we're in a job
+    if (my $job_context = $scope->get_context('job')) {
+      $event->{contexts}{job} = $job_context;
+      $event->{tags}{job_task} //= $job_context->{task};
+      $event->{tags}{job_queue} //= $job_context->{queue};
+    }
+    
+    return $event;
+  });
+}
+
+# Helper methods for manual job monitoring
+sub capture_job_start ($package, $job_id, $task, %options) {
+  my $transaction = Sentry::SDK->start_transaction({
+    name => "minion.job.$task",
+    op => 'queue.job',
+    data => {
+      'job.id' => $job_id,
+      'job.task' => $task,
+      %options,
+    },
+  });
+  
+  Sentry::SDK->configure_scope(sub ($scope) {
+    $scope->set_span($transaction);
+    $scope->set_tag('job_queue', 'minion');
+    $scope->set_tag('job_task', $task);
+  });
+  
+  return $transaction;
+}
+
+sub capture_job_finish ($package, $transaction, $status, %data) {
+  $transaction->set_data($_, $data{$_}) for keys %data;
+  $transaction->set_status($status);
+  $transaction->finish();
+}
+```
+
+**Usage Examples**:
+
+```perl
+# 1. Automatic monitoring (via Mojolicious plugin)
+use Mojolicious::Lite -signatures;
+
+plugin 'SentrySDK' => {
+  dsn => $ENV{SENTRY_DSN},
+  capture_job_args => 1,  # Capture job arguments (be careful with PII)
+  capture_job_results => 0,  # Don't capture results by default
+};
+
+plugin 'Minion' => { SQLite => ':temp:' };
+
+# Define a job - automatically monitored
+app->minion->add_task(send_email => sub ($job, $to, $subject, $body) {
+  # Job execution is automatically wrapped in Sentry transaction
+  # Any exceptions are automatically captured
+  
+  my $mail = send_mail($to, $subject, $body);
+  
+  # Add custom job metadata
+  Sentry::SDK->configure_scope(sub ($scope) {
+    $scope->set_tag('email_provider', 'sendgrid');
+    $scope->set_context('email', {
+      to => $to,
+      subject => $subject,
+      message_id => $mail->message_id,
+    });
+  });
+  
+  return { message_id => $mail->message_id };
+});
+
+# 2. Manual monitoring for custom job systems
+use Sentry::Integration::Minion;
+
+sub process_custom_job ($job_data) {
+  my $transaction = Sentry::Integration::Minion->capture_job_start(
+    $job_data->{id},
+    $job_data->{task},
+    'job.queue' => $job_data->{queue},
+    'job.priority' => $job_data->{priority},
+  );
+  
+  try {
+    my $result = execute_job_logic($job_data);
+    
+    Sentry::Integration::Minion->capture_job_finish(
+      $transaction,
+      'ok',
+      'job.result_size' => length(encode_json($result)),
+      'job.records_processed' => $result->{count},
+    );
+    
+    return $result;
+  } catch {
+    Sentry::SDK->capture_exception($_);
+    
+    Sentry::Integration::Minion->capture_job_finish(
+      $transaction,
+      'internal_error',
+      'job.error' => "$_",
+    );
+    
+    die $_;
+  };
+}
+
+# 3. Job queue monitoring and alerting
+app->minion->add_task(monitor_queue_health => sub ($job) {
+  my $stats = app->minion->stats;
+  
+  # Monitor queue depth
+  if ($stats->{active_jobs} > 1000) {
+    Sentry::SDK->capture_message(
+      "High job queue depth: " . $stats->{active_jobs} . " active jobs",
+      'warning',
+      {
+        extra => {
+          queue_stats => $stats,
+        },
+        tags => {
+          alert_type => 'queue_depth',
+          severity => 'high',
+        },
+      }
+    );
+  }
+  
+  # Monitor failed jobs
+  if ($stats->{failed_jobs} > $stats->{finished_jobs} * 0.1) {
+    Sentry::SDK->capture_message(
+      "High job failure rate: " . $stats->{failed_jobs} . " failed jobs",
+      'error',
+      {
+        extra => {
+          queue_stats => $stats,
+          failure_rate => $stats->{failed_jobs} / ($stats->{finished_jobs} || 1),
+        },
+        tags => {
+          alert_type => 'failure_rate',
+          severity => 'critical',
+        },
+      }
+    );
+  }
+});
+```
+
+**Performance Monitoring Features**:
+
+- **Job Execution Time**: Track how long jobs take to complete
+- **Queue Depth Monitoring**: Alert on high queue backlogs
+- **Job Failure Rates**: Monitor and alert on job failure patterns
+- **Worker Performance**: Track worker efficiency and resource usage
+- **Queue-specific Metrics**: Monitor different queues separately
+- **Job Retry Patterns**: Track jobs that require multiple attempts
+
+**Configuration Options**:
+
+```perl
+plugin 'SentrySDK' => {
+  dsn => $ENV{SENTRY_DSN},
+  
+  # Minion-specific options
+  capture_job_args => 0,       # Capture job arguments (PII consideration)
+  capture_job_results => 0,    # Capture job return values
+  track_job_performance => 1,   # Enable performance monitoring
+  job_sample_rate => 1.0,      # Sample rate for job transactions
+  
+  # Job filtering
+  ignore_job_tasks => ['cleanup', 'heartbeat'],  # Skip monitoring these tasks
+  capture_job_tasks => ['important_task'],       # Only monitor these tasks
+};
+```
+
+**Testing Requirements**:
+- Unit tests for job lifecycle monitoring
+- Integration tests with actual Minion jobs
+- Performance impact assessment
+- Queue depth and failure rate monitoring tests
+- Worker lifecycle event testing
+
+This Minion integration provides comprehensive job queue observability including job execution tracing, error capture, performance monitoring, and queue health metrics.
 
 ## Testing Strategy
 
