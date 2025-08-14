@@ -15,9 +15,30 @@
     }
   },
   'debug' => 1,
-  'default_integrations' => [],
+  'default_integrations' => 1,
   'dsn' => 'abc',
   'environment' => 'my env',
+  'integrations' => [
+    bless( {
+      'initialized' => 1
+    }, 'Sentry::Integration::DieHandler' ),
+    bless( {
+      'breadcrumbs' => 1,
+      'initialized' => 1
+    }, 'Sentry::Integration::DBI' ),
+    bless( {
+      '_package_name' => 'LWP::UserAgent',
+      'breadcrumbs' => 1,
+      'initialized' => 1
+    }, 'Sentry::Integration::LwpUserAgent' ),
+    bless( {
+      'breadcrumbs' => 1,
+      'initialized' => 1
+    }, 'Sentry::Integration::MojoUserAgent' ),
+    bless( {
+      'initialized' => 1
+    }, 'Sentry::Integration::MojoTemplate' )
+  ],
   'release' => 'my release',
   'traces_sample_rate' => '0.5'
 }

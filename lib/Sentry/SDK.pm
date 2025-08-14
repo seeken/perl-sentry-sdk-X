@@ -23,12 +23,15 @@ sub _call_on_hub ($method, @args) {
 sub _init_and_bind ($options) {
   my $hub = Sentry::Hub->get_current_hub();
   my $client
-    = $options->{dsn} ? Sentry::Client->new(_options => $options) : undef;
+    = ($options->{dsn} && $options->{dsn} ne '') ? Sentry::Client->new(_options => $options) : undef;
+  
+  # Always bind the client (even if it's undef) to clear any existing client
+  # bind_client will call setup_integrations if client is defined
   $hub->bind_client($client);
 }
 
 sub init ($package, $options = {}) {
-  $options->{default_integrations} //= [];
+  # Set environment variables first
   $options->{dsn}                  //= $ENV{SENTRY_DSN};
   $options->{traces_sample_rate}   //= $ENV{SENTRY_TRACES_SAMPLE_RATE};
   $options->{release}              //= $ENV{SENTRY_RELEASE};
@@ -36,6 +39,46 @@ sub init ($package, $options = {}) {
   $options->{_metadata}            //= {};
   $options->{_metadata}{sdk}
     = { name => 'sentry.perl', packages => [], version => $VERSION };
+
+  # Only set up integrations if we have a valid DSN
+  if ($options->{dsn} && $options->{dsn} ne '') {
+    # Set default integrations if not explicitly disabled
+    $options->{default_integrations} //= 1;
+    $options->{integrations} //= [];
+    
+    # Add built-in integrations unless disabled
+    if ($options->{default_integrations}) {
+      # Allow selective disabling of built-in integrations
+      my %disabled = map { $_ => 1 } @{$options->{disabled_integrations} // []};
+      
+      # Import integration modules
+      require Sentry::Integration::DieHandler;
+      require Sentry::Integration::DBI;
+      require Sentry::Integration::LwpUserAgent;
+      require Sentry::Integration::MojoUserAgent;
+      require Sentry::Integration::MojoTemplate;
+      
+      unless ($disabled{DieHandler}) {
+        push @{$options->{integrations}}, Sentry::Integration::DieHandler->new;
+      }
+      unless ($disabled{DBI}) {
+        push @{$options->{integrations}}, Sentry::Integration::DBI->new;
+      }
+      unless ($disabled{LwpUserAgent}) {
+        push @{$options->{integrations}}, Sentry::Integration::LwpUserAgent->new;
+      }
+      unless ($disabled{MojoUserAgent}) {
+        push @{$options->{integrations}}, Sentry::Integration::MojoUserAgent->new;
+      }
+      unless ($disabled{MojoTemplate}) {
+        push @{$options->{integrations}}, Sentry::Integration::MojoTemplate->new;
+      }
+    }
+  } else {
+    # No DSN means no integrations
+    $options->{default_integrations} //= [];
+    $options->{integrations} //= [];
+  }
 
   logger->active_contexts(['.*']) if $options->{debug} // $ENV{SENTRY_DEBUG};
 

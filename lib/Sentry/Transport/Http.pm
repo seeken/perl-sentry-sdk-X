@@ -43,18 +43,28 @@ has dsn => undef;
 
 sub send ($self, $payload) {
   return unless $self->dsn;
+  
   my $is_transaction = ($payload->{type} // '') eq 'transaction';
-  my $endpoint       = $is_transaction ? 'envelope' : 'store';
-  my $tx;
+  my $is_envelope = $is_transaction || ref($payload) eq 'Sentry::Envelope';
+  my $endpoint = $is_envelope ? 'envelope' : 'store';
   my $url = $self->_sentry_url . "/$endpoint/";
+  my $tx;
 
-  if ($is_transaction) {
-    my $envelope = Sentry::Envelope->new(
-      event_id => $payload->{event_id},
-      body     => $payload,
-    );
-    $payload = $envelope->serialize;
-    $tx      = $self->_http->post($url => $self->_headers, $payload);
+  if ($is_envelope) {
+    my $envelope;
+    if (ref($payload) eq 'Sentry::Envelope') {
+      # Direct envelope object
+      $envelope = $payload;
+    } else {
+      # Create envelope for transaction
+      $envelope = Sentry::Envelope->new(
+        event_id => $payload->{event_id},
+        body     => $payload,
+      );
+    }
+    
+    my $serialized = $envelope->serialize;
+    $tx = $self->_http->post($url => $self->_headers, $serialized);
   } else {
     $tx = $self->_http->post($url => $self->_headers, json => $payload);
   }

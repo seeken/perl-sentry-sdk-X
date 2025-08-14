@@ -45,10 +45,10 @@ describe 'Sentry::Integration::LwpUserAgent' => sub {
 
     my %crumb = $hub->get_current_scope->breadcrumbs->[0]->%*;
     ok looks_like_number $crumb{timestamp};
-    is $crumb{category}          => 'LWP::UserAgent';
-    is $crumb{data}{status_code} => HTTP_CREATED;
-    is $crumb{data}{url}         => 'http://example.com/';
-    is $crumb{type}              => 'http';
+    is $crumb{category}                          => 'http.client';
+    is $crumb{data}{'http.response.status_code'} => HTTP_CREATED;
+    is $crumb{data}{'url.full'}                  => 'http://example.com/';
+    is $crumb{type}                              => 'http';
   };
 
   it 'sets the Sentry-Trace request header' => sub {
@@ -58,9 +58,8 @@ describe 'Sentry::Integration::LwpUserAgent' => sub {
 
     $http->get('http://example.com/');
 
-    my %headers = $span->spans->[0]->data->{headers}->flatten;
-
-    like $headers{'Sentry-Trace'}, qr{\A [a-z0-9]{32} - [a-z0-9]{16} \z}xms;
+    my $sentry_trace_header = $http->last_request->header('sentry-trace');
+    like $sentry_trace_header, qr{\A [a-z0-9]{32} - [a-z0-9]{16} }xms;
   };
 };
 
