@@ -9,6 +9,8 @@ use Readonly;
 use Sentry::Envelope;
 use Sentry::Hub;
 use Sentry::Logger 'logger';
+use Sentry::RateLimit;
+use Sentry::Backpressure;
 
 Readonly my $SENTRY_API_VERSION => '7';
 
@@ -40,11 +42,40 @@ has _sentry_url => sub ($self) {
       $dsn->project_id);
 };
 has dsn => undef;
+has rate_limit => sub { Sentry::RateLimit->new };
+has backpressure => sub { Sentry::Backpressure->new };
 
 sub send ($self, $payload) {
   return unless $self->dsn;
   
-  my $is_transaction = ($payload->{type} // '') eq 'transaction';
+  # Determine event type for rate limiting
+  my $event_type = 'error';
+  if (ref($payload) eq 'HASH') {
+    $event_type = $payload->{type} // 'error';
+  } elsif (ref($payload) eq 'Sentry::Envelope') {
+    # Check envelope items for type
+    my @items = $payload->get_items();
+    $event_type = $items[0]->{headers}{type} if @items;
+  }
+  
+  # Check rate limits
+  if ($self->rate_limit->is_rate_limited($event_type)) {
+    my $retry_after = $self->rate_limit->get_retry_after($event_type);
+    logger->warn("Rate limited for $event_type events, retry after $retry_after seconds");
+    return;
+  }
+  
+  # Check backpressure
+  if ($self->backpressure->should_drop_event($event_type)) {
+    $self->backpressure->record_dropped_event();
+    logger->warn("Dropped $event_type event due to backpressure");
+    return;
+  }
+  
+  # Track queue size
+  $self->backpressure->increment_queue();
+  
+  my $is_transaction = ($event_type eq 'transaction');
   my $is_envelope = $is_transaction || ref($payload) eq 'Sentry::Envelope';
   my $endpoint = $is_envelope ? 'envelope' : 'store';
   my $url = $self->_sentry_url . "/$endpoint/";
@@ -68,6 +99,19 @@ sub send ($self, $payload) {
   } else {
     $tx = $self->_http->post($url => $self->_headers, json => $payload);
   }
+
+  # Update rate limits from response headers
+  if ($tx->res->headers) {
+    my %headers = map { lc($_) => $tx->res->headers->header($_) } 
+                  $tx->res->headers->names->@*;
+    $self->rate_limit->update_from_headers(\%headers);
+  }
+
+  # Clean up expired rate limits
+  $self->rate_limit->clear_expired();
+  
+  # Update queue size
+  $self->backpressure->decrement_queue();
 
   logger->log(
     sprintf(

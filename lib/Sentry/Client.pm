@@ -14,6 +14,9 @@ use Sentry::Transport::Http;
 use Sentry::Util qw(uuid4 truncate);
 use Time::HiRes;
 use Try::Tiny;
+use File::Spec;
+use JSON::PP;
+use POSIX qw(strftime);
 
 has _dsn     => sub ($self) { Sentry::DSN->parse($self->_options->{dsn}) };
 has _options => sub { {} };
@@ -24,6 +27,129 @@ has integrations => sub ($self) { $self->_options->{integrations} // [] };
 
 sub setup_integrations ($self) {
   Sentry::Integration->setup($self->integrations);
+}
+
+# Enhanced client configuration methods
+sub should_ignore_error ($self, $error) {
+  my $ignore_patterns = $self->_options->{ignore_errors} // [];
+  
+  for my $pattern (@$ignore_patterns) {
+    if (ref($pattern) eq 'Regexp') {
+      return 1 if $error =~ $pattern;
+    } elsif (ref($pattern) eq 'CODE') {
+      return 1 if $pattern->($error);
+    } else {
+      return 1 if index($error, $pattern) >= 0;
+    }
+  }
+  
+  return 0;
+}
+
+sub should_ignore_transaction ($self, $transaction_name) {
+  my $ignore_patterns = $self->_options->{ignore_transactions} // [];
+  
+  for my $pattern (@$ignore_patterns) {
+    if (ref($pattern) eq 'Regexp') {
+      return 1 if $transaction_name =~ $pattern;
+    } elsif (ref($pattern) eq 'CODE') {
+      return 1 if $pattern->($transaction_name);
+    } else {
+      return 1 if index($transaction_name, $pattern) >= 0;
+    }
+  }
+  
+  return 0;
+}
+
+sub should_capture_failed_request ($self, $status_code, $url = undef) {
+  return 0 unless $self->_options->{capture_failed_requests};
+  
+  # Check status codes
+  my $failed_codes = $self->_options->{failed_request_status_codes} // [500..599];
+  my $status_matches = 0;
+  
+  for my $code (@$failed_codes) {
+    if (ref($code) eq 'ARRAY') {
+      $status_matches = 1 if $status_code >= $code->[0] && $status_code <= $code->[1];
+    } else {
+      $status_matches = 1 if $status_code == $code;
+    }
+    last if $status_matches;
+  }
+  
+  return 0 unless $status_matches;
+  
+  # Check URL patterns if URL provided
+  if ($url) {
+    my $target_patterns = $self->_options->{failed_request_targets} // ['.*'];
+    my $url_matches = 0;
+    
+    for my $pattern (@$target_patterns) {
+      if (ref($pattern) eq 'Regexp') {
+        $url_matches = 1 if $url =~ $pattern;
+      } else {
+        $url_matches = 1 if $url =~ qr/$pattern/;
+      }
+      last if $url_matches;
+    }
+    
+    return $url_matches;
+  }
+  
+  return 1;
+}
+
+sub get_max_request_body_size ($self) {
+  my $size = $self->_options->{max_request_body_size} // 'medium';
+  
+  return $size if $size =~ /^\d+$/;
+  
+  return {
+    never  => 0,
+    always => -1,
+    small  => 10 * 1024,      # 10KB
+    medium => 100 * 1024,     # 100KB
+    large  => 1024 * 1024,    # 1MB
+  }->{$size} // 100 * 1024;
+}
+
+sub store_offline_event ($self, $event) {
+  my $offline_path = $self->_options->{offline_storage_path};
+  return unless $offline_path;
+  
+  eval {
+    # Create directory if it doesn't exist
+    unless (-d $offline_path) {
+      require File::Path;
+      File::Path::make_path($offline_path);
+    }
+    
+    # Check max offline events limit
+    my $max_events = $self->_options->{max_offline_events} // 100;
+    my @existing_files = glob(File::Spec->catfile($offline_path, "sentry_event_*.json"));
+    
+    if (@existing_files >= $max_events) {
+      # Remove oldest files
+      @existing_files = sort @existing_files;
+      my $to_remove = @existing_files - $max_events + 1;
+      unlink splice(@existing_files, 0, $to_remove);
+    }
+    
+    # Store event
+    my $timestamp = strftime("%Y%m%d_%H%M%S", localtime);
+    my $filename = File::Spec->catfile($offline_path, "sentry_event_${timestamp}_$$.json");
+    
+    open my $fh, '>', $filename or die "Cannot open $filename: $!";
+    print $fh JSON::PP->new->ascii->pretty->encode($event);
+    close $fh;
+    
+    logger()->debug("Stored offline event: $filename");
+  };
+  
+  if ($@) {
+    logger()->error("Failed to store offline event: $@");
+  }
 }
 
 #  (alternatively normal constructor) This takes typically an object with options + dsn.
@@ -98,9 +224,37 @@ sub _capture_event ($self, $event, $hint = undef, $scope = undef) {
   my $event_id;
 
   try {
+    # Check if error should be ignored
+    my $error_msg = '';
+    if ($event->{exception}) {
+      $error_msg = ref($event->{exception}) eq 'HASH' 
+        ? ($event->{exception}->{values}->[0]->{value} // '')
+        : "$event->{exception}";
+    } elsif ($event->{message}) {
+      $error_msg = ref($event->{message}) eq 'HASH'
+        ? ($event->{message}->{formatted} // $event->{message}->{message} // '')
+        : "$event->{message}";
+    }
+    
+    if ($error_msg && $self->should_ignore_error($error_msg)) {
+      logger()->debug("Ignoring error due to ignore_errors configuration: $error_msg");
+      return;
+    }
+    
+    # Check if transaction should be ignored
+    if ($event->{transaction} && $self->should_ignore_transaction($event->{transaction})) {
+      logger()->debug("Ignoring transaction due to ignore_transactions configuration: $event->{transaction}");
+      return;
+    }
+    
     $event_id = $self->_process_event($event, $hint, $scope)->{event_id};
   } catch {
     logger->error($_);
+    
+    # Store offline if configured
+    if ($self->_options->{offline_storage_path}) {
+      $self->store_offline_event($event);
+    }
   };
 
   return $event_id;
@@ -142,7 +296,65 @@ sub _apply_client_options ($self, $event) {
   $event->{message} = truncate($event->{message}, $max_value_length)
     if $event->{message};
 
+  # Apply request body size limits
+  if ($event->{request} && $event->{request}->{data}) {
+    my $max_body_size = $self->get_max_request_body_size();
+    
+    if ($max_body_size == 0) {
+      # Never capture request body
+      delete $event->{request}->{data};
+    } elsif ($max_body_size > 0) {
+      # Limit request body size
+      my $body_str = ref($event->{request}->{data}) ? 
+        JSON::PP->new->encode($event->{request}->{data}) : 
+        "$event->{request}->{data}";
+      
+      if (length($body_str) > $max_body_size) {
+        $event->{request}->{data} = '[Request body too large]';
+      }
+    }
+    # If max_body_size is -1 (always), keep the full body
+  }
+  
+  # Handle PII scrubbing unless explicitly allowed
+  unless ($options->{send_default_pii}) {
+    $self->_scrub_pii($event);
+  }
+
   return;
+}
+
+sub _scrub_pii ($self, $event) {
+  # Scrub sensitive data from request headers
+  if ($event->{request} && $event->{request}->{headers}) {
+    my $headers = $event->{request}->{headers};
+    
+    for my $header (keys %$headers) {
+      my $lower_header = lc($header);
+      
+      if ($lower_header =~ /^(authorization|cookie|x-api-key|x-auth-token|password|secret)$/) {
+        $headers->{$header} = '[Filtered]';
+      }
+    }
+  }
+  
+  # Scrub user email and username unless explicitly allowed
+  if ($event->{user}) {
+    for my $field (qw(email username ip_address)) {
+      if (exists $event->{user}->{$field}) {
+        $event->{user}->{$field} = '[Filtered]';
+      }
+    }
+  }
+  
+  # Scrub sensitive context data
+  if ($event->{extra}) {
+    for my $key (keys %{$event->{extra}}) {
+      if ($key =~ /^(password|secret|token|key|auth)/i) {
+        $event->{extra}->{$key} = '[Filtered]';
+      }
+    }
+  }
 }
 
 sub get_options ($self) {

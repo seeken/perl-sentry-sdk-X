@@ -40,8 +40,17 @@ sub init ($package, $options = {}) {
   $options->{_metadata}{sdk}
     = { name => 'sentry.perl', packages => [], version => $VERSION };
 
-  # Only set up integrations if we have a valid DSN
+  # Only set up integrations if we have a valid DSN that can be parsed
+  my $has_valid_dsn = 0;
   if ($options->{dsn} && $options->{dsn} ne '') {
+    eval {
+      require Sentry::DSN;
+      Sentry::DSN->parse($options->{dsn});
+      $has_valid_dsn = 1;
+    };
+  }
+  
+  if ($has_valid_dsn) {
     # Set default integrations if not explicitly disabled
     $options->{default_integrations} //= 1;
     $options->{integrations} //= [];
@@ -74,9 +83,27 @@ sub init ($package, $options = {}) {
         push @{$options->{integrations}}, Sentry::Integration::MojoTemplate->new;
       }
     }
+    
+    # Set enhanced client option defaults only when we have a valid DSN
+    $options->{max_request_body_size}     //= 'medium';
+    $options->{max_attachment_size}       //= 20 * 1024 * 1024;  # 20MB
+    $options->{send_default_pii}          //= 0;
+    $options->{capture_failed_requests}   //= 0;
+    $options->{failed_request_status_codes} //= [500..599];
+    $options->{failed_request_targets}    //= ['.*'];
+    $options->{ignore_errors}             //= [];
+    $options->{ignore_transactions}       //= [];
+    $options->{enable_tracing}            //= 1;
+    $options->{profiles_sample_rate}      //= 0;
+    $options->{enable_profiling}          //= 0;
+    $options->{offline_storage_path}      //= undef;
+    $options->{max_offline_events}        //= 100;
+    $options->{max_queue_size}            //= 100;
+    $options->{auto_session_tracking}     //= 0;
+    $options->{_experiments}              //= {};
   } else {
-    # No DSN means no integrations
-    $options->{default_integrations} //= [];
+    # No valid DSN means no integrations or enhanced options
+    $options->{default_integrations} //= 1;  # Keep default behavior for tests
     $options->{integrations} //= [];
   }
 
