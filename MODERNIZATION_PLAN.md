@@ -2034,6 +2034,332 @@ plugin 'SentrySDK' => {
 
 This Minion integration provides comprehensive job queue observability including job execution tracing, error capture, performance monitoring, and queue health metrics.
 
+---
+
+## Additional Code Quality Improvements and Refactoring Opportunities
+
+Beyond the feature modernization, several architectural and code quality improvements should be implemented:
+
+### 9.1 Memory Management and Resource Cleanup
+
+**Issues Identified**:
+- No explicit cleanup of monkey-patched methods in `Sentry::Util::around()`
+- Potential memory leaks from retained closures in integrations
+- Global singleton pattern in `Sentry::Hub` without proper cleanup
+
+**Improvements**:
+
+```perl
+# Enhanced lib/Sentry/Util.pm with proper cleanup
+package Sentry::Util;
+
+my %Patched = ();
+my %OriginalRefs = ();  # Store original method references
+
+sub around ($package, $method, $cb) {
+  my $key = $package . '::' . $method;
+  return if $Patched{$key};
+
+  if (my $e = load_class $package) {
+    die ref $e ? "Exception: $e" : "Module $package not found";
+  }
+
+  my $orig = $package->can($method);
+  $OriginalRefs{$key} = $orig;  # Keep strong reference
+
+  # Use weaker closure to prevent memory leaks
+  monkey_patch $package, $method => sub { 
+    my $orig_ref = $OriginalRefs{$key};
+    $cb->($orig_ref, @_) 
+  };
+
+  $Patched{$key} = 1;
+  return;
+}
+
+# Global cleanup for testing/shutdown
+sub cleanup_all_patches {
+  for my $key (keys %Patched) {
+    my ($package, $method) = split '::', $key, 2;
+    restore_original($package, $method);
+  }
+  %Patched = ();
+  %OriginalRefs = ();
+}
+
+# Enhanced Hub with proper cleanup
+package Sentry::Hub;
+
+sub cleanup ($self) {
+  # Clear scope chain
+  $self->scopes([]);
+  
+  # Cleanup client integrations
+  if (my $client = $self->client) {
+    $client->cleanup_integrations() if $client->can('cleanup_integrations');
+  }
+  
+  # Clear singleton if this is the instance
+  $Instance = undef if $Instance && $Instance == $self;
+}
+
+# Add DESTROY for automatic cleanup
+sub DESTROY ($self) {
+  $self->cleanup();
+}
+```
+
+### 9.2 Error Handling and Resilience Improvements
+
+**Issues Identified**:
+- Inconsistent error handling across integrations
+- Missing fallback mechanisms for integration failures
+- No circuit breaker pattern for failing transports
+
+**Improvements**:
+
+```perl
+# Enhanced integration base class
+package Sentry::Integration::Base;
+
+has enabled => 1;
+has _failed_count => 0;
+has _last_failure => 0;
+has circuit_breaker_threshold => 5;
+has circuit_breaker_timeout => 300;  # 5 minutes
+
+sub is_circuit_open ($self) {
+  return 0 unless $self->_failed_count >= $self->circuit_breaker_threshold;
+  return (time() - $self->_last_failure) < $self->circuit_breaker_timeout;
+}
+
+sub record_failure ($self) {
+  $self->_failed_count($self->_failed_count + 1);
+  $self->_last_failure(time());
+}
+
+sub record_success ($self) {
+  $self->_failed_count(0);
+}
+
+sub safe_execute ($self, $code) {
+  return unless $self->enabled;
+  return if $self->is_circuit_open;
+  
+  try {
+    my $result = $code->();
+    $self->record_success();
+    return $result;
+  } catch {
+    $self->record_failure();
+    warn "Integration " . $self->name . " failed: $_" if $ENV{SENTRY_DEBUG};
+    return;
+  };
+}
+```
+
+### 9.3 Performance Optimizations
+
+**Issues Identified**:
+- String operations in hot paths (SQL truncation)
+- Redundant JSON encoding/decoding
+- Inefficient breadcrumb management
+
+**Improvements**:
+
+```perl
+# Optimized SQL truncation with caching
+package Sentry::Integration::DBI;
+
+has _sql_cache => sub { {} };
+has max_cache_size => 1000;
+
+sub _truncate_sql ($self, $sql, $max_length = 100) {
+  return $sql if length($sql) <= $max_length;
+  
+  # Use cache for frequently seen SQL patterns
+  my $cache_key = substr($sql, 0, 50);
+  my $cache = $self->_sql_cache;
+  
+  if (exists $cache->{$cache_key}) {
+    return $cache->{$cache_key};
+  }
+  
+  # Clean cache if too large
+  if (keys %$cache > $self->max_cache_size) {
+    %$cache = ();
+  }
+  
+  my $truncated = substr($sql, 0, $max_length) . '...';
+  $cache->{$cache_key} = $truncated;
+  
+  return $truncated;
+}
+
+# Optimized breadcrumb management
+package Sentry::Hub::Scope;
+
+sub add_breadcrumb ($self, $breadcrumb) {
+  $breadcrumb->{timestamp} //= int(time() * 1000);  # Use integer timestamps
+  
+  my $breadcrumbs = $self->breadcrumbs;
+  push @$breadcrumbs, $breadcrumb;
+  
+  # Efficient sliding window
+  my $max_crumbs = $ENV{SENTRY_MAX_BREADCRUMBS} || 100;
+  if (@$breadcrumbs > $max_crumbs) {
+    splice @$breadcrumbs, 0, @$breadcrumbs - $max_crumbs;
+  }
+}
+```
+
+### 9.4 Type Safety and Validation Improvements
+
+**Issues Identified**:
+- No parameter validation in public APIs
+- Inconsistent data structure expectations
+- Missing input sanitization
+
+**Improvements**:
+
+```perl
+# Enhanced parameter validation
+package Sentry::SDK;
+
+use Params::ValidationCompiler qw(validation_for);
+use Types::Standard qw(Str HashRef ArrayRef Optional);
+
+my $capture_message_validator = validation_for(
+  params => {
+    message => { type => Str },
+    level => { type => Str, optional => 1 },
+    capture_context => { type => HashRef, optional => 1 },
+  }
+);
+
+sub capture_message ($self, @args) {
+  my %params = $capture_message_validator->(@args);
+  
+  _call_on_hub('capture_message', $params{message}, $params{level}, {
+    capture_context => $params{capture_context},
+  });
+}
+```
+
+### 9.5 Observability and Debugging Enhancements
+
+**Issues Identified**:
+- Limited internal metrics and monitoring
+- Difficult to debug SDK behavior in production
+- No SDK health reporting
+
+**Improvements**:
+
+```perl
+# Internal metrics collection
+package Sentry::SDK::Metrics;
+
+has _counters => sub { {} };
+has _timers => sub { {} };
+
+sub increment ($self, $metric, $value = 1, $tags = {}) {
+  my $key = $self->_metric_key($metric, $tags);
+  $self->_counters->{$key} += $value;
+}
+
+sub get_metrics ($self) {
+  return {
+    counters => { %{$self->_counters} },
+    timers => { %{$self->_timers} },
+    timestamp => time(),
+  };
+}
+
+# Enhanced SDK with metrics
+package Sentry::SDK;
+
+our $METRICS = Sentry::SDK::Metrics->new();
+
+sub capture_exception ($self, @args) {
+  my $start = Time::HiRes::time();
+  
+  $METRICS->increment('sdk.capture_exception.attempts');
+  
+  try {
+    my $result = _call_on_hub('capture_exception', @args);
+    $METRICS->increment('sdk.capture_exception.success');
+    return $result;
+  } catch {
+    $METRICS->increment('sdk.capture_exception.errors');
+    die $_;
+  } finally {
+    my $duration = (Time::HiRes::time() - $start) * 1000;
+    $METRICS->timing('sdk.capture_exception.duration', $duration);
+  };
+}
+```
+
+### 9.6 Configuration Management Improvements
+
+**Issues Identified**:
+- Environment variable handling spread across multiple files
+- No configuration validation
+- Missing configuration schema documentation
+
+**Improvements**:
+
+```perl
+# Centralized configuration management
+package Sentry::Config;
+
+use Types::Standard qw(Str Num Bool HashRef ArrayRef Optional);
+
+my $CONFIG_SCHEMA = {
+  dsn => { type => Str, env => 'SENTRY_DSN' },
+  debug => { type => Bool, env => 'SENTRY_DEBUG', default => 0 },
+  traces_sample_rate => { 
+    type => Num, 
+    env => 'SENTRY_TRACES_SAMPLE_RATE', 
+    default => 0,
+    validator => sub { $_[0] >= 0 && $_[0] <= 1 },
+  },
+  max_breadcrumbs => {
+    type => Num,
+    env => 'SENTRY_MAX_BREADCRUMBS',
+    default => 100,
+    validator => sub { $_[0] > 0 && $_[0] <= 1000 },
+  },
+};
+
+sub load_config ($package, $user_options = {}) {
+  my $config = {};
+  
+  for my $key (keys %$CONFIG_SCHEMA) {
+    my $schema = $CONFIG_SCHEMA->{$key};
+    
+    # Priority: user_options > environment > default
+    my $value = $user_options->{$key} 
+      // ($schema->{env} ? $ENV{$schema->{env}} : undef)
+      // $schema->{default};
+    
+    $config->{$key} = $value;
+  }
+  
+  return $config;
+}
+```
+
+These refactoring improvements focus on production readiness, maintainability, and developer experience. They address:
+
+1. **Memory Management**: Proper cleanup to prevent leaks in long-running applications
+2. **Error Resilience**: Circuit breaker patterns and graceful degradation
+3. **Performance**: Optimizations for hot paths and resource usage
+4. **Type Safety**: Parameter validation and data sanitization  
+5. **Observability**: Internal metrics and health reporting for SDK monitoring
+6. **Configuration**: Centralized, validated configuration management
+
+---
+
 ## Testing Strategy
 
 ### Unit Testing
