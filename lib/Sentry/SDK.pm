@@ -98,6 +98,10 @@ sub init ($package, $options = {}) {
     $options->{enable_profiling}          //= 0;
     $options->{offline_storage_path}      //= undef;
     $options->{max_offline_events}        //= 100;
+    
+    # Advanced Error Handling options (Phase 3)
+    $options->{advanced_error_handling}   //= $ENV{SENTRY_ADVANCED_ERROR_HANDLING} // 0;
+    $options->{advanced_error_handling_config} //= {};
     $options->{max_queue_size}            //= 100;
     $options->{auto_session_tracking}     //= 0;
     $options->{enable_logs}               //= 1;  # Enable structured logging by default

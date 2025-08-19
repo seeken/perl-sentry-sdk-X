@@ -25,6 +25,41 @@ has _transport =>
 has scope        => sub { Sentry::Hub::Scope->new };
 has integrations => sub ($self) { $self->_options->{integrations} // [] };
 
+# Advanced Error Handling
+has advanced_error_handler => sub ($self) {
+  return undef unless $self->_options->{advanced_error_handling};
+  
+  require Sentry::ErrorHandling::Advanced;
+  my $handler = Sentry::ErrorHandling::Advanced->new();
+  
+  # Configure based on options
+  if (my $config = $self->_options->{advanced_error_handling_config}) {
+    if ($config->{fingerprinting}) {
+      $handler->configure_fingerprinting($config->{fingerprinting});
+    }
+    if ($config->{context_enrichment}) {
+      $handler->configure_context_enrichment($config->{context_enrichment});
+    }
+    if ($config->{sampling}) {
+      $handler->configure_sampling($config->{sampling});
+    }
+    if ($config->{classification}) {
+      $handler->configure_classification($config->{classification});
+    }
+  }
+  
+  # Auto-configure based on environment
+  if (my $env = $self->_options->{environment}) {
+    if ($env eq 'production') {
+      $handler->configure_for_production();
+    } elsif ($env eq 'development') {
+      $handler->configure_for_development();
+    }
+  }
+  
+  return $handler;
+};
+
 sub setup_integrations ($self) {
   Sentry::Integration->setup($self->integrations);
 }
@@ -216,6 +251,32 @@ sub event_from_exception ($self, $exception, $hint = undef, $scope = undef) {
 
 sub capture_exception ($self, $exception, $hint = undef, $scope = undef) {
   my $event = $self->event_from_exception($exception, $hint);
+
+  # Apply advanced error handling if enabled
+  if (my $advanced_handler = $self->advanced_error_handler) {
+    my $options = {
+      # Extract context information from hint and scope
+      ($hint && $hint->{user_id} ? (user_id => $hint->{user_id}) : ()),
+      ($hint && $hint->{session_id} ? (session_id => $hint->{session_id}) : ()),
+      ($hint && $hint->{priority} ? (priority => $hint->{priority}) : ()),
+      ($hint && $hint->{customer_tier} ? (customer_tier => $hint->{customer_tier}) : ()),
+      ($hint && $hint->{request_start_time} ? (request_start_time => $hint->{request_start_time}) : ()),
+      
+      # Add scope context if available
+      ($scope && $scope->user ? %{$scope->user} : ()),
+      ($scope && $scope->contexts->{request} ? (
+        request_method => $scope->contexts->{request}->{method},
+        request_uri => $scope->contexts->{request}->{url},
+        headers => $scope->contexts->{request}->{headers},
+      ) : ()),
+    };
+    
+    # Process through advanced error handling pipeline
+    $event = $advanced_handler->process_error($exception, $event, $options);
+    
+    # If event was dropped by sampling, return early
+    return unless $event;
+  }
 
   return $self->_capture_event($event, $hint, $scope);
 }
