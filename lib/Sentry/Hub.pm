@@ -3,7 +3,7 @@ use Mojo::Base -base, -signatures;
 
 use Mojo::Util 'dumper';
 use Sentry::Hub::Scope;
-use Sentry::Logger 'logger';
+use Sentry::Logger;
 use Sentry::Severity;
 use Sentry::Tracing::SamplingMethod;
 use Sentry::Tracing::Transaction;
@@ -159,9 +159,9 @@ sub sample ($self, $transaction, $sampling_context) {
   }
 
   if (!$sample_rate) {
-    logger->log(
+    Sentry::Logger->logger->debug(
       'Discarding transaction because a negative sampling decision was inherited or tracesSampleRate is set to 0',
-      'Tracing'
+      { component => 'Tracing' }
     );
     $transaction->sampled(0);
     return $transaction;
@@ -175,20 +175,20 @@ sub sample ($self, $transaction, $sampling_context) {
 
   # if we're not going to keep it, we're done
   if (!$transaction->sampled) {
-    logger->log(
+    Sentry::Logger->logger->debug(
       "Discarding transaction because it's not included in the random sample (sampling rate = $sample_rate)",
-      'Tracing',
+      { component => 'Tracing' }
     );
     return $transaction;
   }
 
-  logger->log(
+  Sentry::Logger->logger->debug(
     sprintf(
       'Starting %s transaction - %s',
       $transaction->op // '(unknown op)',
       $transaction->name
     ),
-    'Tracing',
+    { component => 'Tracing' }
   );
   return $transaction;
 }

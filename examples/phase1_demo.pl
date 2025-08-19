@@ -12,8 +12,10 @@ use Data::Dumper;
 print "=== Phase 1 Modernization Demo ===\n\n";
 
 print "1. Initializing Sentry SDK with enhanced integration support...\n";
+my $dsn = $ENV{SENTRY_TEST_DSN} // 'https://test@example.com/123';
+print "Using DSN: $dsn\n";
 Sentry::SDK->init({
-    dsn => 'https://test@example.com/123',  # Fake DSN for demo
+    dsn => $dsn,
     debug => 1,
     traces_sample_rate => 1.0,
 });

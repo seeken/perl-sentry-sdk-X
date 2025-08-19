@@ -5,7 +5,7 @@ use version 0.77;
 use Mojo::Util 'dumper';
 use Sentry::Client;
 use Sentry::Hub;
-use Sentry::Logger 'logger';
+use Sentry::Logger;
 
 our $VERSION = version->declare('1.3.9');
 
@@ -100,14 +100,19 @@ sub init ($package, $options = {}) {
     $options->{max_offline_events}        //= 100;
     $options->{max_queue_size}            //= 100;
     $options->{auto_session_tracking}     //= 0;
+    $options->{enable_logs}               //= 1;  # Enable structured logging by default
     $options->{_experiments}              //= {};
+    
+    # Add structured logging to experiments if enable_logs is true
+    if ($options->{enable_logs}) {
+      $options->{_experiments}{enable_logs} = 1;
+    }
   } else {
     # No valid DSN means no integrations or enhanced options
     $options->{default_integrations} //= 1;  # Keep default behavior for tests
     $options->{integrations} //= [];
   }
 
-  logger->active_contexts(['.*']) if $options->{debug} // $ENV{SENTRY_DEBUG};
 
   _init_and_bind($options);
 }
@@ -161,6 +166,67 @@ sub with_monitor ($package, $monitor_slug, $coderef, $options = {}) {
 sub upsert_monitor ($package, $monitor_config) {
   require Sentry::Crons;
   return Sentry::Crons->upsert_monitor($monitor_config);
+}
+
+# Structured logging methods
+sub get_logger ($package) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger();
+}
+
+sub log ($package, $level, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->log($level, $message, $context);
+}
+
+sub logf ($package, $level, $template, @args) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->logf($level, $template, @args);
+}
+
+sub log_trace ($package, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->trace($message, $context);
+}
+
+sub log_debug ($package, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->debug($message, $context);
+}
+
+sub log_info ($package, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->info($message, $context);
+}
+
+sub log_warn ($package, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->warn($message, $context);
+}
+
+sub log_error ($package, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->error($message, $context);
+}
+
+sub log_fatal ($package, $message, $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->fatal($message, $context);
+}
+
+sub log_exception ($package, $exception, $level = 'error', $context = {}) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->log_exception($exception, $level, $context);
+}
+
+sub with_log_context ($package, $context) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->with_context($context);
+}
+
+sub flush_logs ($package) {
+  require Sentry::Logger;
+  return Sentry::Logger->logger->flush();
 }
 
 sub get_last_event_id ($package) {
@@ -350,6 +416,50 @@ Wraps code execution with automatic cron monitoring. Creates a check-in before e
   });
 
 Creates or updates a monitor configuration in Sentry for scheduled job monitoring.
+
+=head2 get_logger
+
+  my $logger = Sentry::SDK->get_logger();
+
+Returns the singleton structured logger instance for direct use.
+
+=head2 log
+
+  Sentry::SDK->log('info', 'User action completed', { user_id => 123 });
+
+Core structured logging method. Supports levels: trace, debug, info, warn, error, fatal.
+
+=head2 logf
+
+  Sentry::SDK->logf('info', 'Processing %d items', $count, { batch_id => $id });
+
+Template-based logging with sprintf formatting. Last argument can be a context hash.
+
+=head2 log_trace, log_debug, log_info, log_warn, log_error, log_fatal
+
+  Sentry::SDK->log_info('Operation completed', { duration_ms => 150 });
+  Sentry::SDK->log_error('Database error', { table => 'users', error => $@ });
+
+Convenience methods for different log levels with structured context.
+
+=head2 log_exception
+
+  Sentry::SDK->log_exception($@, 'error', { operation => 'save_user' });
+
+Logs exceptions with automatic stacktrace extraction and context enrichment.
+
+=head2 with_log_context
+
+  my $contextual_logger = Sentry::SDK->with_log_context({ request_id => $id });
+  $contextual_logger->info('Request processed');
+
+Returns a logger instance with additional context that will be included in all subsequent log entries.
+
+=head2 flush_logs
+
+  my $count = Sentry::SDK->flush_logs();
+
+Manually flushes any buffered log records to Sentry and returns the number of records sent.
 
 =head1 AUTHOR
 

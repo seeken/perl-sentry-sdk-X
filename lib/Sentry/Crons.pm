@@ -4,7 +4,7 @@ use Mojo::Base -base, -signatures;
 use Sentry::Crons::CheckIn;
 use Sentry::Crons::Monitor;
 use Sentry::Hub;
-use Sentry::Logger 'logger';
+use Sentry::Logger;
 use Time::HiRes;
 
 # Global storage for active check-ins
@@ -41,7 +41,10 @@ sub capture_check_in ($class, $options = {}) {
     
     $client->_send_envelope($envelope);
     
-    logger->log("Captured check-in: " . $checkin->check_in_id);
+    Sentry::Logger->logger->debug("Captured check-in: " . $checkin->check_in_id, { 
+        check_in_id => $checkin->check_in_id,
+        monitor_slug => $options->{monitor_slug},
+    });
     
     return $checkin->check_in_id;
 }
@@ -138,7 +141,10 @@ sub upsert_monitor ($class, $monitor_config) {
     
     $client->_send_envelope($envelope);
     
-    logger->log("Upserted monitor: " . $monitor->slug);
+    Sentry::Logger->logger->debug("Upserted monitor: " . $monitor->slug, {
+        monitor_slug => $monitor->slug,
+        monitor_name => $monitor->name,
+    });
     
     return $monitor->slug;
 }

@@ -7,7 +7,7 @@ use Mojo::Util 'dumper';
 use Sentry::DSN;
 use Sentry::Hub::Scope;
 use Sentry::Integration;
-use Sentry::Logger 'logger';
+use Sentry::Logger;
 use Sentry::SourceFileRegistry;
 use Sentry::Stacktrace;
 use Sentry::Transport::Http;
@@ -144,11 +144,11 @@ sub store_offline_event ($self, $event) {
     print $fh JSON::PP->new->ascii->pretty->encode($event);
     close $fh;
     
-    logger()->debug("Stored offline event: $filename");
+    Sentry::Logger->logger->debug("Stored offline event: $filename");
   };
   
   if ($@) {
-    logger()->error("Failed to store offline event: $@");
+    Sentry::Logger->logger->error("Failed to store offline event: $@");
   }
 }
 
@@ -237,19 +237,19 @@ sub _capture_event ($self, $event, $hint = undef, $scope = undef) {
     }
     
     if ($error_msg && $self->should_ignore_error($error_msg)) {
-      logger()->debug("Ignoring error due to ignore_errors configuration: $error_msg");
+      Sentry::Logger->logger->debug("Ignoring error due to ignore_errors configuration: $error_msg");
       return;
     }
     
     # Check if transaction should be ignored
     if ($event->{transaction} && $self->should_ignore_transaction($event->{transaction})) {
-      logger()->debug("Ignoring transaction due to ignore_transactions configuration: $event->{transaction}");
+      Sentry::Logger->logger->debug("Ignoring transaction due to ignore_transactions configuration: $event->{transaction}");
       return;
     }
     
     $event_id = $self->_process_event($event, $hint, $scope)->{event_id};
   } catch {
-    logger->error($_);
+    Sentry::Logger->logger->error($_);
     
     # Store offline if configured
     if ($self->_options->{offline_storage_path}) {
