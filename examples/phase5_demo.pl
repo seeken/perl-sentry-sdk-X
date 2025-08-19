@@ -43,6 +43,9 @@ Sentry::SDK->init({
   capture_failed_requests => 1,
   capture_4xx_errors => 0,  # Only capture 5xx by default
   
+  # Disable default integrations to avoid duplicates
+  disabled_integrations => ['LwpUserAgent', 'MojoUserAgent', 'DieHandler'],
+  
   integrations => [
     Sentry::Integration::CaptureWarn->new(),
     Sentry::Integration::DieHandler->new(),
