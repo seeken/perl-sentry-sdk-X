@@ -6,8 +6,21 @@ use Mojo::Exception;
 sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
   ## no critic (Variables::RequireLocalizedPunctuationVars)
   $SIG{__DIE__} = sub {
-    ref $_[0] ? CORE::die $_[0] : Mojo::Exception->throw(shift);
-    # ref $_[0] ? CORE::die $_[0] : Mojo::Exception->new(shift)->trace;
+    my $error = shift;
+    
+    # Don't interfere with exception objects  
+    if (ref $error) {
+      CORE::die $error;
+    }
+    
+    # Capture the error in Sentry
+    my $hub = $get_current_hub->();
+    if ($hub) {
+      $hub->capture_exception($error);
+    }
+    
+    # Re-throw as Mojo::Exception for better stack traces
+    Mojo::Exception->throw($error);
   };
 }
 

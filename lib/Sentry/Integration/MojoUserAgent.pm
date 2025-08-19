@@ -3,6 +3,7 @@ use Mojo::Base 'Sentry::Integration::Base', -signatures;
 
 use Mojo::Util qw(dumper);
 use Sentry::Util 'around';
+use Sentry::Tracing::Propagation;
 use Time::HiRes;
 
 has breadcrumbs => 1;
@@ -42,7 +43,15 @@ sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
       });
 
       # Add trace propagation headers
-      $tx->req->headers->add('sentry-trace' => $span->to_trace_parent);
+      my $trace_context = $span->get_trace_context();
+      my $headers = Sentry::Tracing::Propagation->inject_trace_context(
+        $trace_context,
+        {}  # additional baggage if needed
+      );
+      
+      for my $header_name (keys %$headers) {
+        $tx->req->headers->add($header_name => $headers->{$header_name});
+      }
     }
 
     my $result = $orig->($ua, $tx, $cb);
@@ -105,8 +114,8 @@ sub _maybe_capture_http_error ($self, $tx, $duration, $span) {
   
   Sentry::SDK->capture_message(
     sprintf('HTTP %s: %s %s', $tx->res->code, $tx->req->method, $tx->req->url),
-    'error',
     {
+      level => 'error',
       contexts => {
         http => {
           method => $tx->req->method,

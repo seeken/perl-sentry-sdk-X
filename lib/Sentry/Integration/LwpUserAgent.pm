@@ -3,6 +3,7 @@ use Mojo::Base 'Sentry::Integration::Base', -signatures;
 
 use Mojo::Util qw(dumper);
 use Sentry::Util 'around';
+use Sentry::Tracing::Propagation;
 use Time::HiRes;
 
 has _package_name => 'LWP::UserAgent';
@@ -42,7 +43,15 @@ sub setup_once ($self, $add_global_event_processor, $get_current_hub) {
       });
 
       # Add trace propagation headers
-      $request->header('sentry-trace' => $span->to_trace_parent);
+      my $trace_context = $span->get_trace_context();
+      my $headers = Sentry::Tracing::Propagation->inject_trace_context(
+        $trace_context,
+        {}  # additional baggage if needed
+      );
+      
+      for my $header_name (keys %$headers) {
+        $request->header($header_name => $headers->{$header_name});
+      }
     }
 
     my $result = $orig->($lwp, $request, @args);
@@ -103,8 +112,8 @@ sub _maybe_capture_http_error ($self, $request, $response, $duration, $span) {
   
   Sentry::SDK->capture_message(
     sprintf('HTTP %s: %s %s', $response->code, $request->method, $request->uri),
-    'error',
     {
+      level => 'error',
       contexts => {
         http => {
           method => $request->method,

@@ -5,6 +5,7 @@ use HTTP::Status qw(status_message);
 use Readonly;
 use Sentry::Tracing::Status;
 use Sentry::Tracing::Transaction;
+use Sentry::Tracing::Propagation;
 use Sentry::Util qw(uuid4);
 use Time::HiRes  qw(time);
 
@@ -75,7 +76,7 @@ sub start_child ($self, $span_context = {}) {
   return $child_span;
 }
 
-sub get_trace_context ($self) {
+sub get_span_data ($self) {
   return {
     data           => $self->data,
     description    => $self->description,
@@ -124,6 +125,33 @@ sub set_http_status ($self, $status) {
 
 sub finish ($self) {
   $self->timestamp(time);
+}
+
+# Generate sentry-trace header value for distributed tracing
+sub to_sentry_trace ($self) {
+  my $sampled = defined $self->sampled ? ($self->sampled ? '1' : '0') : '';
+  return $self->trace_id . '-' . $self->span_id . '-' . $sampled;
+}
+
+# Get trace context for HTTP propagation
+sub get_trace_context ($self) {
+  return {
+    'sentry-trace' => $self->to_sentry_trace(),
+    trace_id => $self->trace_id,
+    span_id => $self->span_id,
+    sampled => $self->sampled
+  };
+}
+
+# Continue trace from propagated context 
+sub from_trace_context ($class, $trace_context, %options) {
+  my $span = $class->new(
+    trace_id => $trace_context->{trace_id},
+    parent_span_id => $trace_context->{span_id},
+    sampled => $trace_context->{sampled},
+    %options
+  );
+  return $span;
 }
 
 sub _collect_spans ($self) {
