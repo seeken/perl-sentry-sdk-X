@@ -218,6 +218,107 @@ sub log_fatal ($package, $message, $context = {}) {
   return Sentry::Logger->logger->fatal($message, $context);
 }
 
+# Custom Instrumentation API
+
+our $_metrics;
+our $_spans;
+our $_aggregator;
+
+sub _get_metrics ($package) {
+  return $_metrics if $_metrics;
+  
+  require Sentry::Instrumentation::Metrics;
+  $_metrics = Sentry::Instrumentation::Metrics->new();
+  return $_metrics;
+}
+
+sub _get_spans ($package) {
+  return $_spans if $_spans;
+  
+  require Sentry::Instrumentation::Spans;
+  $_spans = Sentry::Instrumentation::Spans->new();
+  return $_spans;
+}
+
+sub _get_aggregator ($package) {
+  return $_aggregator if $_aggregator;
+  
+  require Sentry::Instrumentation::Aggregator;
+  $_aggregator = Sentry::Instrumentation::Aggregator->new();
+  return $_aggregator;
+}
+
+# Metrics API
+
+sub increment ($package, $metric_name, $value = 1, $tags = {}) {
+  return $package->_get_metrics()->increment($metric_name, $value, $tags);
+}
+
+sub gauge ($package, $metric_name, $value, $tags = {}) {
+  return $package->_get_metrics()->gauge($metric_name, $value, $tags);
+}
+
+sub histogram ($package, $metric_name, $value, $tags = {}) {
+  return $package->_get_metrics()->histogram($metric_name)->record($value, $tags);
+}
+
+sub distribution ($package, $metric_name, $value, $tags = {}) {
+  return $package->_get_metrics()->distribution($metric_name)->record($value, $tags);
+}
+
+sub set ($package, $metric_name, $value, $tags = {}) {
+  return $package->_get_metrics()->set($metric_name)->add($value, $tags);
+}
+
+sub timing ($package, $metric_name, $duration_ms, $tags = {}) {
+  return $package->_get_metrics()->timing($metric_name, $duration_ms, $tags);
+}
+
+sub time_block ($package, $metric_name, $code_block, $tags = {}) {
+  return $package->_get_metrics()->time_block($metric_name, $code_block, $tags);
+}
+
+# Custom Spans API
+
+sub start_span ($package, $operation, $description = undef, $data = {}) {
+  return $package->_get_spans()->start_span($operation, $description, $data);
+}
+
+sub trace ($package, $operation, $code_block, $description = undef) {
+  my $options = {};
+  $options->{description} = $description if defined $description;
+  return $package->_get_spans()->trace($operation, $code_block, $options);
+}
+
+sub start_batch ($package, $operation, $description = undef) {
+  my $options = {};
+  $options->{description} = $description if defined $description;
+  return $package->_get_spans()->start_batch($operation, [], $options);
+}
+
+sub measure_timing ($package, $operation, $code_block, $tags = {}) {
+  my $options = { tags => $tags };
+  return $package->_get_spans()->measure_timing($operation, $code_block, $options);
+}
+
+# Metrics Aggregation API
+
+sub flush_metrics ($package) {
+  return $package->_get_aggregator()->flush();
+}
+
+sub get_metrics_stats ($package) {
+  return $package->_get_aggregator()->get_stats();
+}
+
+sub start_aggregator ($package) {
+  return $package->_get_aggregator()->start();
+}
+
+sub stop_aggregator ($package) {
+  return $package->_get_aggregator()->stop();
+}
+
 sub log_exception ($package, $exception, $level = 'error', $context = {}) {
   require Sentry::Logger;
   return Sentry::Logger->logger->log_exception($exception, $level, $context);
@@ -464,6 +565,162 @@ Returns a logger instance with additional context that will be included in all s
   my $count = Sentry::SDK->flush_logs();
 
 Manually flushes any buffered log records to Sentry and returns the number of records sent.
+
+=head1 CUSTOM INSTRUMENTATION
+
+The Perl Sentry SDK provides comprehensive custom instrumentation capabilities for application-specific monitoring and telemetry collection.
+
+=head2 increment
+
+  Sentry::SDK->increment('api.requests', 1, { endpoint => '/users' });
+  Sentry::SDK->increment('background.jobs')->with_tag('queue', 'email');
+
+Increments a counter metric by the specified value (default 1). Supports fluent API with method chaining.
+
+=head2 gauge
+
+  Sentry::SDK->gauge('system.memory_usage', $memory_bytes);
+  Sentry::SDK->gauge('queue.size', 150, { queue => 'emails' });
+
+Records a gauge metric representing a point-in-time value. Perfect for system metrics, queue sizes, and resource utilization.
+
+=head2 histogram
+
+  Sentry::SDK->histogram('http.response_time', $duration_ms);
+  Sentry::SDK->histogram('db.query_time', 45.2, { table => 'users', operation => 'select' });
+
+Records histogram values for statistical analysis including averages, percentiles, and distributions.
+
+=head2 distribution
+
+  Sentry::SDK->distribution('user.session_duration', $session_ms);
+
+Similar to histograms but optimized for high-cardinality data and global statistical aggregation.
+
+=head2 set
+
+  Sentry::SDK->set('active_users', $user_id);
+  Sentry::SDK->set('unique_sessions', $session_id, { environment => 'production' });
+
+Records unique values in a set, automatically handling deduplication for tracking distinct entities.
+
+=head2 timing
+
+  Sentry::SDK->timing('expensive.computation', $duration_ms);
+
+Convenience method for recording timing metrics in milliseconds.
+
+=head2 time_block
+
+  my $result = Sentry::SDK->time_block('database.backup', sub {
+    perform_backup();
+    return "backup_completed";
+  }, { database => 'users' });
+
+Automatically times a code block execution and records the duration as a histogram metric.
+
+=head2 start_span
+
+  my $span = Sentry::SDK->start_span('auth.jwt_verification', 'JWT token validation');
+  $span->set_data('token_type', 'bearer');
+  # ... perform work ...
+  $span->finish();
+
+Creates a custom span for detailed operation tracking with automatic context propagation.
+
+=head2 trace
+
+  my $result = Sentry::SDK->trace('order.processing', sub {
+    process_order($order_id);
+    return $order_status;
+  }, 'Processing customer order');
+
+Automatically manages span lifecycle around a code block with proper error handling and cleanup.
+
+=head2 start_batch
+
+  my $batch = Sentry::SDK->start_batch('notifications.send', 'Sending user notifications');
+  for my $user (@users) {
+    $batch->process_item($user->{id}, sub { send_notification($user) });
+  }
+  $batch->finish();
+
+Creates a batch processing span that tracks individual item success/failure rates and aggregate timing.
+
+=head2 measure_timing
+
+  my ($result, $duration) = Sentry::SDK->measure_timing('complex.calculation', sub {
+    return perform_calculation();
+  }, { algorithm => 'optimized' });
+
+Measures code block execution time and automatically records both span and histogram metrics.
+
+=head2 flush_metrics
+
+  my $stats = Sentry::SDK->flush_metrics();
+  print "Flushed $stats->{metrics_flushed} metrics in $stats->{flush_duration}s\n";
+
+Manually flushes collected metrics to Sentry and returns aggregation statistics.
+
+=head2 get_metrics_stats
+
+  my $stats = Sentry::SDK->get_metrics_stats();
+  print "Collected: $stats->{metrics_collected}, Buffer: $stats->{buffer_size}\n";
+
+Returns current metrics collection statistics without flushing.
+
+=head2 start_aggregator
+
+  Sentry::SDK->start_aggregator();
+
+Starts the automatic metrics aggregator for periodic batching and sending of collected metrics.
+
+=head2 stop_aggregator
+
+  Sentry::SDK->stop_aggregator();
+
+Stops the automatic metrics aggregator and flushes any remaining metrics.
+
+=head1 CUSTOM INSTRUMENTATION EXAMPLES
+
+=head2 Application Performance Monitoring
+
+  # Track API endpoint performance
+  Sentry::SDK->trace('api.user_lookup', sub {
+    Sentry::SDK->increment('api.requests', 1, { 
+      endpoint => '/users',
+      method => 'GET' 
+    });
+    
+    my $user = get_user_by_id($user_id);
+    
+    Sentry::SDK->gauge('cache.hit_rate', calculate_hit_rate());
+    return $user;
+  });
+
+=head2 Background Job Monitoring
+
+  # Monitor batch job processing
+  my $batch = Sentry::SDK->start_batch('email.newsletter', 'Send weekly newsletter');
+  
+  for my $user (@subscribers) {
+    $batch->process_item($user->{email}, sub {
+      send_newsletter_email($user);
+      Sentry::SDK->increment('email.sent', 1, { type => 'newsletter' });
+    });
+  }
+  
+  $batch->finish();
+
+=head2 System Resource Monitoring
+
+  # Track system metrics
+  Sentry::SDK->gauge('system.memory_usage', get_memory_usage());
+  Sentry::SDK->gauge('system.cpu_usage', get_cpu_usage());
+  Sentry::SDK->gauge('database.connections', get_active_connections());
+  
+  # Track unique active users
+  Sentry::SDK->set('active_users', $current_user_id);
 
 =head1 AUTHOR
 
