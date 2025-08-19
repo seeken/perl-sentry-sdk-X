@@ -18,16 +18,17 @@ A streamlined demo showing the advanced error handling integrated with the SDK.
 print "🚀 Phase 3: Advanced Error Handling + SDK Integration\n";
 print "=" x 55, "\n\n";
 
-# Mock DSN for testing (won't actually send)
-my $mock_dsn = 'https://abc123@o12345.ingest.sentry.io/67890';
+# Use real DSN or environment variable
+my $dsn = $ENV{SENTRY_DSN} || 'https://bc1b329862866abb9c8f70c5dac940aa@sentry.cgtmigration.com/9';
 
 print "1. 🔧 INITIALIZING SDK WITH ADVANCED ERROR HANDLING\n";
 print "-" x 50, "\n";
 
 # Initialize SDK with advanced error handling enabled
 Sentry::SDK->init({
-  dsn => $mock_dsn,
+  dsn => $dsn,
   environment => 'development',
+  debug => 1,  # Enable debug output to see what's happening
   
   # Enable advanced error handling - this is the key feature!
   advanced_error_handling => 1,
@@ -54,12 +55,11 @@ eval { die "Test error for advanced processing demo" };
 my $event_id_1 = Sentry::SDK->capture_exception($@);
 print "  ✓ Event captured with ID: " . ($event_id_1 || 'none') . "\n\n";
 
-# Test 2: Error with context hint
-print "Test 2: Error with priority context\n";
+# Test 2: Error with level hint (using supported hint format)
+print "Test 2: Error with severity level\n";
 eval { die "Critical system failure - database unavailable" };
 my $event_id_2 = Sentry::SDK->capture_exception($@, {
   level => 'fatal',
-  priority => 'critical',
 });
 print "  ✓ Event captured with ID: " . ($event_id_2 || 'none') . "\n\n";
 
