@@ -8,6 +8,7 @@ use Sentry::DSN;
 use Sentry::Hub::Scope;
 use Sentry::Integration;
 use Sentry::Logger;
+use Sentry::Profiling;
 use Sentry::SourceFileRegistry;
 use Sentry::Stacktrace;
 use Sentry::Transport::Http;
@@ -58,6 +59,23 @@ has advanced_error_handler => sub ($self) {
   }
   
   return $handler;
+};
+
+# Profiling support
+has profiler => sub ($self) {
+  return undef unless $self->_options->{enable_profiling};
+  
+  require Sentry::Profiling::Config;
+  my $config = Sentry::Profiling::Config->from_options($self->_options);
+  
+  # Validate configuration
+  my $errors = $config->validate();
+  if (@$errors) {
+    warn "Profiling configuration errors: " . join(', ', @$errors);
+    return undef;
+  }
+  
+  return Sentry::Profiling->new(config => $config);
 };
 
 sub setup_integrations ($self) {
@@ -493,6 +511,27 @@ sub _process_event ($self, $event, $hint, $scope) {
 
 sub _send_event ($self, $event) {
   $self->_transport->send($event);
+  return;
+}
+
+sub send_envelope ($self, $envelope_item) {
+  # Create envelope for profile data
+  require Sentry::Envelope;
+  
+  my $envelope = Sentry::Envelope->new(
+    headers => {
+      event_id => uuid4(),
+      sent_at => strftime('%Y-%m-%dT%H:%M:%S.000Z', gmtime(time())),
+      trace => {},
+    }
+  );
+  
+  # Add the profile item to the envelope
+  # envelope_item should have 'type' and 'profile' keys
+  $envelope->add_item($envelope_item->{type}, $envelope_item->{profile});
+  
+  # Send via transport
+  $self->_transport->send_envelope($envelope);
   return;
 }
 

@@ -6,6 +6,7 @@ use Mojo::Util 'dumper';
 use Sentry::Client;
 use Sentry::Hub;
 use Sentry::Logger;
+use Sentry::Profiling;
 
 our $VERSION = version->declare('1.3.9');
 
@@ -148,6 +149,71 @@ sub add_breadcrumb ($package, $crumb) {
 
 sub start_transaction ($package, $context, $custom_sampling_context = undef) {
   return _call_on_hub('start_transaction', $context, $custom_sampling_context);
+}
+
+# Profiling methods
+
+sub start_profiler ($package, $options = {}) {
+  my $hub = Sentry::Hub->get_current_hub();
+  my $client = $hub->client;
+  return undef unless $client && $client->profiler;
+  
+  return $client->profiler->start_profiler($options);
+}
+
+sub stop_profiler ($package) {
+  my $hub = Sentry::Hub->get_current_hub();
+  my $client = $hub->client;
+  return undef unless $client && $client->profiler;
+  
+  return $client->profiler->stop_profiler();
+}
+
+sub get_profiler ($package) {
+  my $hub = Sentry::Hub->get_current_hub();
+  my $client = $hub->client;
+  return undef unless $client;
+  
+  return $client->profiler;
+}
+
+sub is_profiling_active ($package) {
+  my $hub = Sentry::Hub->get_current_hub();
+  my $client = $hub->client;
+  return 0 unless $client && $client->profiler;
+  
+  return $client->profiler->is_profiling_active();
+}
+
+sub profile {
+  my $package = shift;
+  my $code = pop;  # Code is always the last argument
+  my $options = shift || {};  # Optional options hash
+  
+  # If options is a string, treat it as the name
+  if (!ref($options)) {
+    $options = { name => $options };
+  }
+  
+  my $profiler = $package->start_profiler($options);
+  
+  my @result;
+  my $wantarray = wantarray;
+  eval {
+    if ($wantarray) {
+      @result = $code->();
+    } elsif (defined $wantarray) {
+      $result[0] = $code->();
+    } else {
+      $code->();
+    }
+  };
+  
+  my $error = $@;
+  $package->stop_profiler();
+  
+  die $error if $error;
+  return $wantarray ? @result : $result[0];
 }
 
 # Cron monitoring methods

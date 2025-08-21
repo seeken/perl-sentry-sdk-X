@@ -190,6 +190,12 @@ sub sample ($self, $transaction, $sampling_context) {
     ),
     { component => 'Tracing' }
   );
+  
+  # Start profiling if transaction is sampled
+  if ($transaction->can('start_profiling')) {
+    $transaction->start_profiling();
+  }
+  
   return $transaction;
 }
 

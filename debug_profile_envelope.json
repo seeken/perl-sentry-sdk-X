@@ -1,0 +1,83 @@
+{
+   "profile" : {
+      "device" : {
+         "architecture" : "x86_64-linux-thread-multi"
+      },
+      "duration_ns" : 30426979,
+      "environment" : "production",
+      "frames" : [
+         {
+            "filename" : "debug_profile_format.pl",
+            "function" : "(main)",
+            "in_app" : true,
+            "lineno" : 56,
+            "module" : "main",
+            "package" : "main"
+         },
+         {
+            "filename" : "debug_profile_format.pl",
+            "function" : "(eval)",
+            "in_app" : true,
+            "lineno" : 56,
+            "module" : "main",
+            "package" : "main"
+         },
+         {
+            "filename" : "debug_profile_format.pl",
+            "function" : "(main)",
+            "in_app" : true,
+            "lineno" : 65,
+            "module" : "main",
+            "package" : "main"
+         },
+         {
+            "filename" : "debug_profile_format.pl",
+            "function" : "(eval)",
+            "in_app" : true,
+            "lineno" : 65,
+            "module" : "main",
+            "package" : "main"
+         }
+      ],
+      "platform" : "python",
+      "runtime" : {
+         "name" : "perl",
+         "version" : "v5.32.1"
+      },
+      "samples" : [
+         {
+            "elapsed_since_start_ns" : 10161161,
+            "stack_id" : 0,
+            "thread_id" : "139643"
+         },
+         {
+            "elapsed_since_start_ns" : 20271062,
+            "stack_id" : 0,
+            "thread_id" : "139643"
+         },
+         {
+            "elapsed_since_start_ns" : 30358076,
+            "stack_id" : 1,
+            "thread_id" : "139643"
+         }
+      ],
+      "stacks" : [
+         [
+            0,
+            1
+         ],
+         [
+            2,
+            3
+         ]
+      ],
+      "thread_metadata" : {
+         "139643" : {
+            "name" : "main"
+         }
+      },
+      "timestamp" : 1755752100.45859,
+      "version" : "1"
+   },
+   "type" : "profile"
+}
