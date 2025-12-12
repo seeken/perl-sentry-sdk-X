@@ -69,12 +69,32 @@ sub flush ($self, $hub = undef) {
     
     # Create envelope for log records
     my $envelope = $client->_prepare_envelope();
-    
-    # Add each log record as a structured log item
-    for my $record (@$records) {
-        $envelope->add_item('log', $record->to_envelope_item());
-    }
-    
+
+    # According to Sentry SDK spec, logs must be sent as an ARRAY in a single envelope item
+    # https://develop.sentry.dev/sdk/data-model/envelope-items/
+    #
+    # Format requirements:
+    # - Single log envelope item per envelope
+    # - Content-type: application/vnd.sentry.items.log+json
+    # - item_count header must match number of logs
+    # - Logs in an "items" array
+
+    # Build array of log payloads
+    my @log_items = map { $_->to_envelope_item() } @$records;
+
+    # Create the log container with items array
+    my $log_container = {
+        items => \@log_items
+    };
+
+    # Add the log item with proper headers
+    my $headers = {
+        content_type => 'application/vnd.sentry.items.log+json',
+        item_count => scalar(@log_items),
+    };
+
+    $envelope->add_item('log', $log_container, $headers);
+
     # Send the envelope
     $client->_send_envelope($envelope);
     

@@ -79,27 +79,99 @@ sub to_hash ($self) {
 }
 
 sub to_envelope_item ($self) {
-    # Create a proper structured log item following OpenTelemetry format
+    # Create a Sentry log item following the official spec
+    # https://develop.sentry.dev/sdk/telemetry/logs/
+    # Attributes must use typed format: { "value": <val>, "type": <type> }
+
     my $item = {
-        # OpenTelemetry log format fields
-        severity_text => $self->level,                    # trace, debug, info, warn, error, fatal
-        severity_number => $self->severity_number,        # 1, 5, 9, 13, 17, 21
-        body => $self->message // $self->body,            # The log message
-        attributes => $self->attributes // {},            # Additional structured data
-        time_unix_nano => int($self->timestamp * 1_000_000_000),  # Nanoseconds since epoch
-        
-        # Additional Sentry-specific fields
-        logger => 'perl-sentry-structured-logging',
-        platform => 'perl',
+        # Required fields
+        timestamp => $self->timestamp,  # Unix timestamp in seconds
+        level => $self->level,  # trace, debug, info, warn, error, fatal
+        body => $self->message // $self->body,  # The log message
+
+        # Optional but recommended
+        severity_number => $self->severity_number,  # OpenTelemetry severity number
+
+        # Attributes (structured data with typed values)
+        attributes => {},
     };
-    
-    # Add trace context if available
-    if (defined $self->trace_id) {
-        $item->{trace_id} = $self->trace_id;
-        $item->{span_id} = $self->span_id if defined $self->span_id;
+
+    # Convert attributes to Sentry's typed format
+    my $attrs = $self->attributes // {};
+    for my $key (keys %$attrs) {
+        my $value = $attrs->{$key};
+        $item->{attributes}->{$key} = _get_attribute_type($value);
     }
-    
+
+    # trace_id is REQUIRED by Sentry Log specification
+    # Generate a random 32-char hex string if no trace context exists
+    my $trace_id = $self->trace_id // _generate_trace_id();
+    $item->{trace_id} = $trace_id;
+
+    # Add span_id to attributes if available
+    if (defined $self->span_id) {
+        $item->{attributes}->{'sentry.trace.parent_span_id'} = {
+            value => $self->span_id,
+            type => 'string'
+        };
+    }
+
+    # Add SDK information to attributes
+    $item->{attributes}->{'sentry.sdk.name'} //= { value => 'perl-sentry', type => 'string' };
+    $item->{attributes}->{'sentry.sdk.version'} //= { value => '1.3.9', type => 'string' };
+
+    # Add environment and release from Hub/Client if available
+    eval {
+        require Sentry::Hub;
+        my $hub = Sentry::Hub->get_current_hub();
+        if ($hub && $hub->client) {
+            my $options = $hub->client->_options;
+            if ($options) {
+                if (defined $options->{environment}) {
+                    $item->{attributes}->{'sentry.environment'} = {
+                        value => $options->{environment},
+                        type => 'string'
+                    };
+                }
+                if (defined $options->{release}) {
+                    $item->{attributes}->{'sentry.release'} = {
+                        value => $options->{release},
+                        type => 'string'
+                    };
+                }
+            }
+        }
+    };
+
     return $item;
+}
+
+# Generate a random 32-character hex trace ID (16 random bytes)
+sub _generate_trace_id {
+    my @chars = ('0'..'9', 'a'..'f');
+    return join '', map { $chars[rand @chars] } 1..32;
+}
+
+# Helper function to determine attribute type and format
+sub _get_attribute_type ($value) {
+    my $ref = ref($value);
+
+    if (!$ref) {
+        # Scalar - determine type
+        if ($value =~ /^-?\d+$/) {
+            return { value => int($value), type => 'integer' };
+        } elsif ($value =~ /^-?\d+\.?\d*$/) {
+            return { value => $value + 0, type => 'double' };
+        } else {
+            return { value => "$value", type => 'string' };
+        }
+    } elsif ($ref eq 'ARRAY' || $ref eq 'HASH') {
+        # Serialize complex types as JSON strings
+        require Mojo::JSON;
+        return { value => Mojo::JSON::encode_json($value), type => 'string' };
+    } else {
+        return { value => "$value", type => 'string' };
+    }
 }
 
 # Check if this record should be sent based on level filtering

@@ -18,13 +18,10 @@ if ($dsn) {
         dsn => $dsn,
         environment => 'demo',
         release => 'phase6-demo@1.0.0',
-        enable_logs => 1,  # Enable structured logging support
     });
 } else {
     print "No DSN provided - running in mock mode\n";
-    Sentry::SDK->init({
-        enable_logs => 1,  # Enable structured logging support even in mock mode
-    });
+    Sentry::SDK->init({});
 }
 
 print "\n1. Basic Structured Logging\n";
