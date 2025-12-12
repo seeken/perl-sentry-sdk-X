@@ -4,6 +4,7 @@ use Test::Exception;
 
 use lib 'lib';
 use Sentry::SDK;
+use Sentry::Hub;
 use Sentry::Profiling;
 use Sentry::Profiling::Profile;
 use Sentry::Profiling::Frame;
@@ -101,18 +102,28 @@ subtest 'Profiler configuration' => sub {
     ok(!$profile, 'No profile when disabled');
 };
 
-# Test SDK profiling methods (without actual sampling)
-subtest 'SDK profiling API' => sub {
-    # Test with no DSN (should gracefully handle missing client)
+# Test profiling through Client (SDK profiling API was moved to Client level)
+subtest 'Client profiling setup' => sub {
+    # Test with no DSN - client will be undef
     Sentry::SDK->init({});
-    
-    ok(!Sentry::SDK->is_profiling_active(), 'Not profiling without client');
-    
-    my $profile = Sentry::SDK->start_profiler({ name => 'test' });
-    ok(!$profile, 'No profiling without valid client');
-    
-    my $profiler = Sentry::SDK->get_profiler();
-    ok(!$profiler, 'No profiler without valid client');
+    my $hub = Sentry::Hub->get_current_hub();
+
+    ok(!$hub->client, 'No client without DSN');
+
+    # Test with DSN and profiling enabled
+    Sentry::SDK->init({
+        dsn => 'https://key@sentry.io/1',
+        enable_profiling => 1,
+        profiles_sample_rate => 0.5,
+    });
+
+    $hub = Sentry::Hub->get_current_hub();
+    ok($hub->client, 'Client created with DSN');
+
+    # Profiling is now configured through client options
+    my $options = $hub->client->get_options;
+    ok($options->{enable_profiling}, 'Profiling enabled in options');
+    is($options->{profiles_sample_rate}, 0.5, 'Sample rate set in options');
 };
 
 # Test transaction integration structure

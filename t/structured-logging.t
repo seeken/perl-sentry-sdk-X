@@ -39,9 +39,10 @@ subtest 'LogRecord creation and serialization' => sub {
     my $envelope_item = $record->to_envelope_item();
     ok($envelope_item, 'Envelope item created');
     is($envelope_item->{level}, 'info', 'Envelope level correct');
-    is($envelope_item->{message}, 'Test message', 'Envelope message correct');
-    is($envelope_item->{user_id}, 123, 'Context included in envelope');
-    is($envelope_item->{action}, 'login', 'Context values preserved');
+    is($envelope_item->{body}, 'Test message', 'Envelope body correct');
+    # Context is now in attributes with typed format
+    is($envelope_item->{attributes}->{user_id}->{value}, 123, 'Context included in attributes');
+    is($envelope_item->{attributes}->{action}->{value}, 'login', 'Context values preserved in attributes');
     
     # Test severity levels
     my $trace_record = Sentry::Logger::LogRecord->new(level => 'trace', message => 'test');

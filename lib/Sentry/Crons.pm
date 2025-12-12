@@ -26,7 +26,7 @@ sub capture_check_in ($class, $options = {}) {
     
     # Validate required fields
     unless ($checkin->monitor_slug) {
-        logger->error("CheckIn requires monitor_slug");
+        Sentry::Logger->logger->error("CheckIn requires monitor_slug");
         return undef;
     }
     
@@ -56,7 +56,7 @@ sub update_check_in ($class, $check_in_id, $status, $duration_ms = undef) {
     unless ($checkin) {
         # We can't update a check-in without the original monitor_slug
         # This would require the user to provide it manually
-        logger->warn("Cannot update check-in without original context: $check_in_id");
+        Sentry::Logger->logger->warn("Cannot update check-in without original context: $check_in_id");
         return undef;
     }
     
@@ -98,7 +98,7 @@ sub with_monitor ($class, $monitor_slug, $coderef, $options = {}) {
     if ($@) {
         $error = $@;
         $status = Sentry::Crons::CheckIn::STATUS_ERROR;
-        logger->error("Monitor execution failed: $error");
+        Sentry::Logger->logger->error("Monitor execution failed: $error");
     }
     
     my $duration_ms = int((Time::HiRes::time() - $start_time) * 1000);
@@ -131,7 +131,7 @@ sub upsert_monitor ($class, $monitor_config) {
     # Validate the monitor configuration
     my @errors = $monitor->validate();
     if (@errors) {
-        logger->error("Monitor validation failed: " . join(", ", @errors));
+        Sentry::Logger->logger->error("Monitor validation failed: " . join(", ", @errors));
         return undef;
     }
     
@@ -156,7 +156,7 @@ sub cleanup_stale_checkins ($class, $max_age_seconds = 3600) {
     for my $check_in_id (keys %active_checkins) {
         my $checkin = $active_checkins{$check_in_id};
         if ($checkin->timestamp < $cutoff_time) {
-            logger->warn("Cleaning up stale check-in: $check_in_id");
+            Sentry::Logger->logger->warn("Cleaning up stale check-in: $check_in_id");
             delete $active_checkins{$check_in_id};
         }
     }
