@@ -59,6 +59,76 @@ describe 'Sentry::Stacktrace::Frame' => sub {
     ok $frame_json->{in_app};
   };
 
+  describe 'in_app_include and in_app_exclude options' => sub {
+    it 'in_app_include marks matching modules as in-app' => sub {
+      # External module that would normally be NOT in-app
+      $frame->filename('/external/External/Module.pm');
+      $frame->module('External::Module');
+      $frame_json = decode_json encode_json $frame;
+      ok !$frame_json->{in_app}, 'External module is not in-app by default';
+
+      # Add include pattern for External::
+      $frame->in_app_include(['External::']);
+      $frame_json = decode_json encode_json $frame;
+      ok $frame_json->{in_app}, 'Module matches in_app_include, now in-app';
+    };
+
+    it 'in_app_exclude marks matching modules as NOT in-app' => sub {
+      # Local module that would normally be in-app
+      $frame->filename('lib/My/Module.pm');
+      $frame->module('My::Module');
+      $frame->in_app_include([]);  # Reset include
+      $frame_json = decode_json encode_json $frame;
+      ok $frame_json->{in_app}, 'Local module is in-app by default';
+
+      # Add exclude pattern for My::
+      $frame->in_app_exclude(['My::']);
+      $frame_json = decode_json encode_json $frame;
+      ok !$frame_json->{in_app}, 'Module matches in_app_exclude, now NOT in-app';
+    };
+
+    it 'in_app_include takes precedence over in_app_exclude' => sub {
+      $frame->filename('lib/My/Module.pm');
+      $frame->module('My::Module');
+      # Both match - include should win
+      $frame->in_app_include(['My::']);
+      $frame->in_app_exclude(['My::']);
+      $frame_json = decode_json encode_json $frame;
+      ok $frame_json->{in_app}, 'in_app_include takes precedence over in_app_exclude';
+    };
+
+    it 'handles multiple prefixes' => sub {
+      $frame->filename('/external/Vendor/Package.pm');
+      $frame->module('Vendor::Package');
+      $frame->in_app_include(['App::', 'MyCompany::', 'Vendor::']);
+      $frame->in_app_exclude([]);
+      $frame_json = decode_json encode_json $frame;
+      ok $frame_json->{in_app}, 'Third include prefix matches';
+
+      $frame->in_app_include([]);
+      $frame->in_app_exclude(['External::', 'ThirdParty::', 'Vendor::']);
+      $frame_json = decode_json encode_json $frame;
+      ok !$frame_json->{in_app}, 'Third exclude prefix matches';
+    };
+
+    it 'handles undef module gracefully' => sub {
+      $frame->module(undef);
+      $frame->in_app_include(['SomeModule::']);
+      $frame->in_app_exclude(['OtherModule::']);
+      lives_ok { $frame_json = decode_json encode_json $frame }
+        'No crash with undef module';
+    };
+
+    it 'handles empty prefix strings' => sub {
+      $frame->filename('lib/My/Module.pm');
+      $frame->module('My::Module');
+      $frame->in_app_include(['', 'My::']);  # Empty prefix ignored
+      $frame->in_app_exclude([]);
+      $frame_json = decode_json encode_json $frame;
+      ok $frame_json->{in_app}, 'Empty prefix in include is ignored';
+    };
+  };
+
   it 'has file context' => sub {
     is $frame_json->{pre_context},  'pre context';
     is $frame_json->{context_line}, 'context line';

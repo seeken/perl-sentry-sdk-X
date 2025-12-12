@@ -10,10 +10,30 @@ has [qw(module filename line subroutine)];
 has _source_file_registry => sub { Sentry::SourceFileRegistry->new };
 has _home                 => sub { Mojo::Home->new->detect };
 
+# In-app detection configuration (set from Client options)
+has in_app_include => sub { [] };  # Module prefixes that ARE app code (takes precedence)
+has in_app_exclude => sub { [] };  # Module prefixes that are NOT app code
+
 sub _is_in_app ($self) {
-  return substr($self->filename, 0, 1) ne '/'
-    || ( index($self->filename, $Config{siteprefix}) == -1
-      && index($self->filename, $self->_home) > -1);
+  my $module = $self->module // '';
+  my $filename = $self->filename // '';
+
+  # in_app_include takes precedence - if module matches, it's in-app
+  for my $prefix (@{$self->in_app_include // []}) {
+    return 1 if $prefix && index($module, $prefix) == 0;
+  }
+
+  # in_app_exclude - if module matches, it's NOT in-app
+  for my $prefix (@{$self->in_app_exclude // []}) {
+    return 0 if $prefix && index($module, $prefix) == 0;
+  }
+
+  # Fall back to default heuristics:
+  # - Relative paths (not starting with /) are likely app code
+  # - Files not in Perl's siteprefix (CPAN) AND in the app's home are in-app
+  return substr($filename, 0, 1) ne '/'
+    || ( index($filename, $Config{siteprefix}) == -1
+      && index($filename, $self->_home) > -1);
 }
 
 sub _map_file_to_context ($self) {

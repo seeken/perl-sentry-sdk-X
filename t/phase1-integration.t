@@ -118,4 +118,57 @@ subtest 'Comprehensive event processing' => sub {
   is($event->{user}->{id}, '123', 'User ID preserved');
 };
 
+# Test DieHandler stack trace capture
+subtest 'DieHandler captures stack traces' => sub {
+  use Mojo::Exception;
+
+  # Reset the hub
+  require Sentry::Hub;
+  my $hub = Sentry::Hub->get_current_hub();
+  $hub->reset();
+
+  # Initialize SDK (this sets up the DieHandler integration)
+  Sentry::SDK->init({ dsn => 'https://test@sentry.io/1' });
+
+  # Test that die inside eval creates Mojo::Exception with stack trace
+  my $error;
+
+  # Create nested functions to test stack trace capture
+  my $level3 = sub { die "Error at level 3"; };
+  my $level2 = sub { $level3->(); };
+  my $level1 = sub { $level2->(); };
+
+  eval { $level1->(); };
+  $error = $@;
+
+  # The DieHandler should have converted the plain string to Mojo::Exception
+  isa_ok($error, 'Mojo::Exception', 'Error converted to Mojo::Exception');
+
+  # Check that the stack trace was captured
+  ok($error->can('frames'), 'Exception has frames method');
+  my $frames = $error->frames // [];
+  ok(scalar(@$frames) >= 3, 'Stack trace has at least 3 frames')
+    or diag("Got " . scalar(@$frames) . " frames");
+
+  # Verify the frames contain expected information
+  if (@$frames) {
+    # Frames should contain package, file, line, subroutine
+    my $first_frame = $frames->[0];
+    ok(defined $first_frame->[0], 'Frame has package');
+    ok(defined $first_frame->[1], 'Frame has file');
+    ok(defined $first_frame->[2], 'Frame has line number');
+  }
+
+  # Test that already-traced exceptions pass through unchanged
+  my $traced_exception = Mojo::Exception->new("Pre-traced error")->trace;
+  my $original_frame_count = scalar(@{$traced_exception->frames // []});
+
+  eval { die $traced_exception; };
+  my $caught = $@;
+
+  isa_ok($caught, 'Mojo::Exception', 'Traced exception preserved');
+  is(scalar(@{$caught->frames // []}), $original_frame_count,
+     'Original frame count preserved');
+};
+
 done_testing();

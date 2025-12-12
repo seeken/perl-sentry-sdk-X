@@ -81,6 +81,20 @@ describe 'Sentry::SDK' => sub {
       is($options->{traces_sample_rate}, '0.123', 'traces_sample_rate from env');
     };
 
+    it 'passes in_app_include and in_app_exclude to client' => sub {
+      Sentry::SDK->init({
+        dsn => 'test-dsn',
+        in_app_include => ['MyApp::', 'MyCompany::'],
+        in_app_exclude => ['ThirdParty::', 'Legacy::'],
+      });
+
+      my $options = $hub->client->get_options;
+      is_deeply($options->{in_app_include}, ['MyApp::', 'MyCompany::'],
+        'in_app_include passed to client');
+      is_deeply($options->{in_app_exclude}, ['ThirdParty::', 'Legacy::'],
+        'in_app_exclude passed to client');
+    };
+
     it 'disables SDK if DSN is empty' => sub {
       Sentry::SDK->init({ dsn => '' });
 

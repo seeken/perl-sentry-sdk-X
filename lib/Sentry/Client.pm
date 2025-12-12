@@ -249,6 +249,8 @@ sub event_from_exception ($self, $exception, $hint = undef, $scope = undef) {
     frame_filter => sub ($frame) {
       $frame->module !~ m{^(Sentry::.*|Class::MOP|CGI::Carp|Try::Tiny)$};
     },
+    in_app_include => $self->_options->{in_app_include} // [],
+    in_app_exclude => $self->_options->{in_app_exclude} // [],
   });
 
   return {

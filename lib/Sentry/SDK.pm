@@ -101,6 +101,10 @@ sub init ($package, $options = {}) {
     $options->{max_queue_size}            //= 100;
     $options->{auto_session_tracking}     //= 0;
     $options->{_experiments}              //= {};
+
+    # In-app frame detection options
+    $options->{in_app_include}            //= [];  # Module prefixes that ARE app code
+    $options->{in_app_exclude}            //= [];  # Module prefixes that are NOT app code
   } else {
     # No valid DSN means no integrations or enhanced options
     $options->{default_integrations} //= 1;  # Keep default behavior for tests
