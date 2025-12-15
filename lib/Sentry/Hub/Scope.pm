@@ -61,6 +61,13 @@ sub set_context ($self, $key, $context = undef) {
   return $self;
 }
 
+sub set_contexts ($self, $contexts) {
+  for my $key (keys %$contexts) {
+    $self->contexts->{$key} = $contexts->{$key};
+  }
+  return $self;
+}
+
 sub set_level ($self, $level) {
   $self->level($level);
 }
