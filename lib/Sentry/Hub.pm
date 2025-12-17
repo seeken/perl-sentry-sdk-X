@@ -124,13 +124,7 @@ sub sample ($self, $transaction, $sampling_context) {
   my $client  = $self->client or return;
   my $options = ($client && $client->get_options) // {};
 
-  #  nothing to do if there's no client or if tracing is disabled
-  if (!$client || !$options->{traces_sample_rate}) {
-    $transaction->sampled(0);
-    return $transaction;
-  }
-
-  # if the user has forced a sampling decision by passing a `sampled` value in
+  # If the user has forced a sampling decision by passing a `sampled` value in
   # their transaction context, go with that
   if (defined $transaction->sampled) {
     $transaction->tags({
@@ -138,50 +132,107 @@ sub sample ($self, $transaction, $sampling_context) {
       __sentry_samplingMethod => Sentry::Tracing::SamplingMethod->Explicit,
     });
 
-    return $transaction;
+    return $self->_finalize_sampling($transaction);
   }
 
   my $sample_rate;
+  my $sampling_method;
 
-  if (defined $sampling_context->{parent_sampled}) {
+  # Build the full sampling context for the traces_sampler callback
+  my $full_sampling_context = {
+    transaction_context => {
+      name => $transaction->name,
+      op   => $transaction->op,
+    },
+    parent_sampled => $sampling_context->{parent_sampled},
+    %{$sampling_context // {}},
+  };
+
+  # Priority 1: traces_sampler callback (if defined)
+  if (my $traces_sampler = $options->{traces_sampler}) {
+    if (ref($traces_sampler) eq 'CODE') {
+      my $sampler_result = eval { $traces_sampler->($full_sampling_context) };
+
+      if ($@) {
+        Sentry::Logger->logger->error(
+          "traces_sampler threw an error: $@",
+          { component => 'Tracing' }
+        );
+        # Fall through to other sampling methods
+      } elsif (defined $sampler_result) {
+        # Sampler returned a value - use it
+        $sample_rate = $sampler_result;
+        $sampling_method = 'traces_sampler';
+
+        $transaction->tags({
+          $transaction->tags->%*,
+          __sentry_samplingMethod => 'traces_sampler',
+          __sentry_sampleRate     => $sample_rate,
+        });
+      }
+      # If sampler returned undef, fall through to other methods
+    }
+  }
+
+  # Priority 2: Inherited sampling from parent (if no sampler decision)
+  if (!defined $sample_rate && defined $sampling_context->{parent_sampled}) {
     $sample_rate = $sampling_context->{parent_sampled};
+    $sampling_method = 'inheritance';
+
     $transaction->tags({
       $transaction->tags->%*,
       __sentry_samplingMethod => Sentry::Tracing::SamplingMethod->Inheritance,
     });
-  } else {
-    $sample_rate = $options->{traces_sample_rate};
-    $transaction->tags({
-      $transaction->tags->%*,
-      __sentry_samplingMethod => Sentry::Tracing::SamplingMethod->Rate,
-      __sentry_sampleRate     => $sample_rate,
-    });
   }
 
+  # Priority 3: traces_sample_rate (fallback)
+  if (!defined $sample_rate) {
+    $sample_rate = $options->{traces_sample_rate};
+    $sampling_method = 'client_rate';
+
+    if ($sample_rate) {
+      $transaction->tags({
+        $transaction->tags->%*,
+        __sentry_samplingMethod => Sentry::Tracing::SamplingMethod->Rate,
+        __sentry_sampleRate     => $sample_rate,
+      });
+    }
+  }
+
+  # No sample rate means tracing is disabled
   if (!$sample_rate) {
     Sentry::Logger->logger->debug(
-      'Discarding transaction because a negative sampling decision was inherited or tracesSampleRate is set to 0',
+      'Discarding transaction because tracing is disabled (no traces_sample_rate or traces_sampler)',
       { component => 'Tracing' }
     );
     $transaction->sampled(0);
     return $transaction;
   }
 
-  # Now we roll the dice. Math.random is inclusive of 0, but not of 1, so
-  # strict < is safe here. In case sampleRate is a boolean, the < comparison
-  # will cause it to be automatically cast to 1 if it's true and 0 if it's
-  # false.
-  $transaction->sampled(rand() < $sample_rate);
+  # Make the sampling decision
+  # If sample_rate is exactly 1 (or truthy boolean), always sample
+  # Otherwise, roll the dice
+  if ($sample_rate >= 1) {
+    $transaction->sampled(1);
+  } elsif ($sample_rate <= 0) {
+    $transaction->sampled(0);
+  } else {
+    $transaction->sampled(rand() < $sample_rate);
+  }
 
-  # if we're not going to keep it, we're done
+  # If we're not going to keep it, we're done
   if (!$transaction->sampled) {
     Sentry::Logger->logger->debug(
-      "Discarding transaction because it's not included in the random sample (sampling rate = $sample_rate)",
+      "Discarding transaction because it's not included in the random sample (sampling rate = $sample_rate, method = $sampling_method)",
       { component => 'Tracing' }
     );
     return $transaction;
   }
 
+  return $self->_finalize_sampling($transaction);
+}
+
+sub _finalize_sampling ($self, $transaction) {
   Sentry::Logger->logger->debug(
     sprintf(
       'Starting %s transaction - %s',
@@ -190,12 +241,12 @@ sub sample ($self, $transaction, $sampling_context) {
     ),
     { component => 'Tracing' }
   );
-  
+
   # Start profiling if transaction is sampled
-  if ($transaction->can('start_profiling')) {
+  if ($transaction->sampled && $transaction->can('start_profiling')) {
     $transaction->start_profiling();
   }
-  
+
   return $transaction;
 }
 

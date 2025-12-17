@@ -105,6 +105,14 @@ sub init ($package, $options = {}) {
     # In-app frame detection options
     $options->{in_app_include}            //= [];  # Module prefixes that ARE app code
     $options->{in_app_exclude}            //= [];  # Module prefixes that are NOT app code
+
+    # Dynamic sampling callback (takes precedence over traces_sample_rate)
+    # Should be a coderef that receives ($sampling_context) and returns:
+    #   - A number 0-1 (sample rate)
+    #   - 1 or true (always sample)
+    #   - 0 or false (never sample)
+    #   - undef (fall back to traces_sample_rate)
+    $options->{traces_sampler}            //= undef;
   } else {
     # No valid DSN means no integrations or enhanced options
     $options->{default_integrations} //= 1;  # Keep default behavior for tests

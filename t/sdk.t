@@ -192,6 +192,142 @@ describe 'Sentry::SDK' => sub {
     };
     ok $tx->sampled;
   };
+
+  describe 'traces_sampler' => sub {
+    it 'uses traces_sampler callback when provided' => sub {
+      my @sampler_calls;
+
+      Sentry::SDK->init({
+        dsn => 'abc',
+        traces_sample_rate => 0,  # Would normally not sample
+        traces_sampler => sub {
+          my ($ctx) = @_;
+          push @sampler_calls, $ctx;
+          return 1;  # Force sample
+        },
+      });
+
+      my $tx = Sentry::SDK->start_transaction({
+        name => 'test-transaction',
+        op   => 'test.op',
+      });
+
+      ok $tx->sampled, 'Transaction sampled via traces_sampler';
+      is scalar(@sampler_calls), 1, 'Sampler called once';
+      is $sampler_calls[0]->{transaction_context}{name}, 'test-transaction',
+        'Sampler receives transaction name';
+      is $sampler_calls[0]->{transaction_context}{op}, 'test.op',
+        'Sampler receives transaction op';
+      is $tx->tags->{__sentry_samplingMethod}, 'traces_sampler',
+        'Sampling method is traces_sampler';
+    };
+
+    it 'traces_sampler can return 0 to never sample' => sub {
+      Sentry::SDK->init({
+        dsn => 'abc',
+        traces_sample_rate => 1,  # Would normally always sample
+        traces_sampler => sub { return 0 },  # Never sample
+      });
+
+      my $tx = Sentry::SDK->start_transaction({
+        name => 'never-sample',
+        op   => 'test',
+      });
+
+      ok !$tx->sampled, 'Transaction not sampled when sampler returns 0';
+    };
+
+    it 'traces_sampler returning undef falls back to traces_sample_rate' => sub {
+      Sentry::SDK->init({
+        dsn => 'abc',
+        traces_sample_rate => 1,
+        traces_sampler => sub { return undef },  # Fall back
+      });
+
+      my $tx = Sentry::SDK->start_transaction({
+        name => 'fallback-test',
+        op   => 'test',
+      });
+
+      ok $tx->sampled, 'Transaction sampled via fallback to traces_sample_rate';
+      is $tx->tags->{__sentry_samplingMethod}, 'client_rate',
+        'Sampling method is client_rate (fallback)';
+    };
+
+    it 'traces_sampler receives custom sampling context' => sub {
+      my $received_ctx;
+
+      Sentry::SDK->init({
+        dsn => 'abc',
+        traces_sampler => sub {
+          my ($ctx) = @_;
+          $received_ctx = $ctx;
+          return 1;
+        },
+      });
+
+      my $tx = Sentry::SDK->start_transaction(
+        { name => 'ctx-test', op => 'test' },
+        { request_path => '/api/slow', user_id => 123 }
+      );
+
+      is $received_ctx->{request_path}, '/api/slow',
+        'Custom context passed to sampler';
+      is $received_ctx->{user_id}, 123,
+        'Custom context values accessible';
+    };
+
+    it 'traces_sampler can conditionally sample based on context' => sub {
+      Sentry::SDK->init({
+        dsn => 'abc',
+        traces_sample_rate => 0.1,
+        traces_sampler => sub {
+          my ($ctx) = @_;
+          # Always sample /api/critical paths
+          if ($ctx->{request_path} && $ctx->{request_path} =~ m{^/api/critical}) {
+            return 1;
+          }
+          # Never sample health checks
+          if ($ctx->{transaction_context}{name} =~ /health/) {
+            return 0;
+          }
+          # Fall back to default rate for everything else
+          return undef;
+        },
+      });
+
+      # Critical path - always sampled
+      my $critical_tx = Sentry::SDK->start_transaction(
+        { name => '/api/critical/endpoint', op => 'http' },
+        { request_path => '/api/critical/endpoint' }
+      );
+      ok $critical_tx->sampled, 'Critical path always sampled';
+
+      # Health check - never sampled
+      my $health_tx = Sentry::SDK->start_transaction(
+        { name => '/health', op => 'http' },
+        {}
+      );
+      ok !$health_tx->sampled, 'Health check never sampled';
+    };
+
+    it 'explicit sampled=1 overrides traces_sampler' => sub {
+      Sentry::SDK->init({
+        dsn => 'abc',
+        traces_sampler => sub { return 0 },  # Would not sample
+      });
+
+      my $tx = Sentry::SDK->start_transaction({
+        name    => 'explicit-sample',
+        op      => 'test',
+        sampled => 1,  # Force sample
+      });
+
+      ok $tx->sampled, 'Explicit sampled=1 overrides sampler';
+      is $tx->tags->{__sentry_samplingMethod}, 'explicitly_set',
+        'Sampling method is explicitly_set';
+    };
+  };
 };
 
 runtests;
